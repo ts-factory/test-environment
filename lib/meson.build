@@ -93,6 +93,7 @@ te_agent_libs = [
     'tad',
     'ta_job',
     'ta_restconf',
+    'ta_wifi',
     'rpcs_bpf',
     'rpcs_dpdk',
     'rpcs_job',

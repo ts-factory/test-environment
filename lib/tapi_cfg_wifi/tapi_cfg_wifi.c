@@ -26,6 +26,7 @@ static const te_enum_map wifi_standard_mapping[] = {
     { .name = "n", .value = TAPI_CFG_WIFI_STANDARD_N },
     { .name = "ac", .value = TAPI_CFG_WIFI_STANDARD_AC },
     { .name = "ax", .value = TAPI_CFG_WIFI_STANDARD_AX },
+    { .name = "be", .value = TAPI_CFG_WIFI_STANDARD_BE },
     TE_ENUM_MAP_END
 };
 
