@@ -40,6 +40,7 @@ te_common_libs = [
     'rpc_dpdk',
     'rpc_types',
     'ovs_flow',
+    'tapi_cfg_wifi',
 ]
 
 # Test Engine libraries
