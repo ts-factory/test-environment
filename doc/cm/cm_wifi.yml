@@ -1,0 +1,288 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+
+- comment: |
+    WiFi AP and STA settings on Agents.
+
+    Copyright (C) 2025 Interpretica, Unipessoal Lda. All rights reserved.
+
+
+- register:
+
+    - oid: "/agent/wifi"
+      access: read_only
+      type: none
+      d: |
+         Root object of the WiFi configuration tree.
+         Name: empty
+
+    - oid: "/agent/wifi/configurator"
+      access: read_write
+      type: string
+      d: |
+         Select configurator
+         Name: empty
+         Value: "uci" or "hostapd_wpa_supplicant"
+
+    - oid: "/agent/wifi/enable"
+      access: read_write
+      type: int32
+      d: |
+         Enable or disable WiFi
+         Name: empty
+         Value: 0 or 1
+
+    - oid: "/agent/wifi/status"
+      access: read_only
+      type: int32
+      volatile: true
+      d: |
+         Is WiFi enabled or not
+         Name: empty
+         Value: 0 or 1
+
+    - oid: "/agent/wifi/port"
+      access: read_create
+      type: none
+      d: |
+         WiFi port instance.
+         Name: any, typically 2_4 or 5
+
+    - oid: "/agent/wifi/port/enable"
+      access: read_write
+      type: int32
+      d: |
+         Port enable state
+         Name: empty
+         Value: 1 (true) or 0 (false)
+
+    - oid: "/agent/wifi/port/ifname"
+      access: read_write
+      type: string
+      d: |
+         Interface name
+         Name: empty
+         Value: Any supported by Linux
+
+    - oid: "/agent/wifi/port/standard"
+      access: read_write
+      type: string
+      d: |
+         WiFi standard.
+         Name: empty
+         Value: g, n, ac, ax
+
+    - oid: "/agent/wifi/port/channel"
+      access: read_write
+      type: uint8
+      d: |
+         WiFi channel.
+         Name: empty
+         Value: Channel number
+
+    - oid: "/agent/wifi/port/width"
+      access: read_write
+      type: uint32
+      d: |
+         Bandwidth
+         Name: empty
+         Value: 20, 40, 80, 160, 320
+
+    - oid: "/agent/wifi/port/max_a_msdu"
+      access: read_write
+      type: uint32
+      d: |
+         Max A-MSDU
+         Name: empty
+         Value: any supported value
+
+    - oid: "/agent/wifi/port/max_a_mpdu"
+      access: read_write
+      type: uint32
+      d: |
+         Max A-MPDU
+         Name: empty
+         Value: any supported value
+
+    - oid: "/agent/wifi/port/frag_threshold"
+      access: read_write
+      type: uint32
+      d: |
+         Fragmentation threshold.
+         Name: empty
+         Value: 0 (disable fragmentation) or 256 .. 2346
+
+    - oid: "/agent/wifi/port/rts_threshold"
+      access: read_write
+      type: uint32
+      d: |
+         RTS threshold.
+         Name: empty
+         Value: Any supported value
+
+    - oid: "/agent/wifi/port/short_retry_limit"
+      access: read_write
+      type: uint32
+      d: |
+         Short retry limit.
+         Name: empty
+         Value: Any supported value
+
+    - oid: "/agent/wifi/port/long_retry_limit"
+      access: read_write
+      type: uint32
+      d: |
+         Long retry limit.
+         Name: empty
+         Value: Any supported value
+
+    - oid: "/agent/wifi/port/guard_interval"
+      access: read_write
+      type: uint32
+      d: |
+         Guard interval
+         Name: empty
+         Value: Any supported value (in ns)
+
+    - oid: "/agent/wifi/port/aifs"
+      access: read_write
+      type: uint32
+      d: |
+         Arbitration Inter-Frame Space
+         Name: empty
+         Value: Any supported value
+
+    - oid: "/agent/wifi/port/contention_window_min"
+      access: read_write
+      type: uint32
+      d: |
+         Contention window minimum
+         Name: empty
+         Value: Any supported value
+
+    - oid: "/agent/wifi/port/contention_window_max"
+      access: read_write
+      type: uint32
+      d: |
+         Contention window maximum
+         Name: empty
+         Value: Any supported value
+
+    - oid: "/agent/wifi/port/txop_limit"
+      access: read_write
+      type: uint32
+      d: |
+         TXOP Limit
+         Name: empty
+         Value: Any supported value (in microseconds)
+
+    - oid: "/agent/wifi/port/tx_power"
+      access: read_write
+      type: uint32
+      d: |
+         TX power
+         Name: empty
+         Value: Any supported value (in DBM)
+
+    - oid: "/agent/wifi/port/max_nss"
+      access: read_write
+      type: uint32
+      d: |
+         Maximum number of spatial streams
+         Name: empty
+         Value: Any supported value
+
+    - oid: "/agent/wifi/port/option"
+      access: read_create
+      type: none
+      d: |
+         Additional options passed to underlying configurator.
+         Name: any
+         Value: none
+
+    - oid: "/agent/wifi/port/option/value"
+      access: read_write
+      type: string
+      d: |
+         Value of the option passed to underlying configurator.
+         Name: empty
+         Value: any option permitted by underlying configurator.
+
+    - oid: "/agent/wifi/port/ssid"
+      access: read_create
+      type: none
+      d: |
+         SSID instance.
+         Name: Internal SSID name
+
+    - oid: "/agent/wifi/port/ssid/enable"
+      access: read_write
+      type: int32
+      d: |
+         SSID enable status
+         Name: empty
+         Value: 1 (true) or 0 (false)
+
+    - oid: "/agent/wifi/port/ssid/ifname"
+      access: read_write
+      type: string
+      d: |
+         Interface name
+         Name: empty
+         Value: Any supported by Linux
+
+    - oid: "/agent/wifi/port/ssid/name"
+      access: read_write
+      type: string
+      d: |
+         SSID name.
+         Name: empty
+         Value: SSID name
+
+    - oid: "/agent/wifi/port/ssid/mode"
+      access: read_write
+      type: string
+      d: |
+         SSID mode
+         Name: empty
+         Value: ap/sta
+
+    - oid: "/agent/wifi/port/ssid/security"
+      access: read_write
+      type: string
+      d: |
+         SSID security.
+         Name: empty
+         Value: open, wpa, wpa2, wpa3
+
+    - oid: "/agent/wifi/port/ssid/protocol"
+      access: read_write
+      type: string
+      d: |
+         SSID protocol.
+         Name: empty
+         Value: ccmp, tkip
+
+    - oid: "/agent/wifi/port/ssid/passphrase"
+      access: read_write
+      type: string
+      d: |
+         SSID passphrase.
+         Name: empty
+         Value: Passphrase 8 to 63 characters long
+
+    - oid: "/agent/wifi/port/ssid/option"
+      access: read_create
+      type: none
+      d: |
+         Additional options passed to underlying configurator.
+         Name: any
+         Value: none
+
+    - oid: "/agent/wifi/port/ssid/option/value"
+      access: read_write
+      type: string
+      d: |
+         Value of the option passed to underlying configurator.
+         Name: empty
+         Value: any option permitted by underlying configurator.
