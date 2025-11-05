@@ -590,6 +590,28 @@ extern te_errno te_vec_split_string(const char *str, te_vec *strvec, char sep,
                                     bool empty_is_none);
 
 /**
+ * Tokenize a string into chunks separated by symbols passed as @p sep_symbols.
+ *
+ * The copies of the chunks are pushed into the @p strvec.
+ *
+ * @note The element size of @p strvec must be `sizeof(char *)`.
+ *
+ * @note Adjacent separators are skipped, so e.g.
+ *       @c ':::' would be split into zero chunks when using colon as
+ *       a separator.
+ *
+ * @param[in]     str            String to split.
+ * @param[in,out] strvec         Target vector for string chunks.
+ *                               The original content is **not** destroyed,
+ *                               new items are added to the end.
+ * @param[in]     sep_symbols    String with separator characters.
+ *
+ * @return Status code (always 0).
+ */
+extern te_errno te_vec_tokenize_string(const char *str, te_vec *strvec,
+                                       const char *sep_symbols);
+
+/**
  * Sort the elements of @p vec in place according to @p compar.
  *
  * @param vec      Vector to sort.
