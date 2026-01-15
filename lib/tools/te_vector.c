@@ -274,6 +274,39 @@ te_vec_split_string(const char *str, te_vec *strvec, char sep,
     return 0;
 }
 
+/* See the description in te_vector.h */
+te_errno
+te_vec_tokenize_string(const char *str, te_vec *strvec, const char *sep_symbols)
+{
+    char       *str_copy;
+    char       *part;
+    char       *ptr = NULL;
+
+    assert(strvec != NULL);
+    assert(strvec->element_size == sizeof(char *));
+    assert(sep_symbols != NULL);
+
+    te_vec_set_destroy_fn_safe(strvec, te_vec_item_free_ptr);
+
+    if (str == NULL || *str == '\0')
+        return 0;
+
+    str_copy = TE_STRDUP(str);
+    part = strtok_r(str_copy, sep_symbols, &ptr);
+    while (part != NULL)
+    {
+        char *tmp_part;
+
+        tmp_part = TE_STRDUP(part);
+
+        TE_VEC_APPEND(strvec, tmp_part);
+        part = strtok_r(NULL, sep_symbols, &ptr);
+    }
+    free(str_copy);
+
+    return 0;
+}
+
 void
 te_vec_sort(te_vec *vec, int (*compar)(const void *, const void *))
 {
