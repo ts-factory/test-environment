@@ -336,7 +336,8 @@ dump_packet(unsigned char *user, const struct pcap_pkthdr *h,
     lock.l_whence = SEEK_SET;
     lock.l_start = 0;
     lock.l_len = 0;
-    fcntl(dumpinfo.fd, F_SETLKW, &lock);
+    if (dumpinfo.fd != -1)
+        fcntl(dumpinfo.fd, F_SETLKW, &lock);
     lock.l_type = F_UNLCK;
 
     offset = pcap_dump_ftell(dumpinfo.dumper);
@@ -346,8 +347,12 @@ dump_packet(unsigned char *user, const struct pcap_pkthdr *h,
         dumpinfo.file_size))
     {
         pcap_dump_close(dumpinfo.dumper);
+        dumpinfo.dumper = NULL;
         if (dumpinfo.fd != -1)
+        {
             close(dumpinfo.fd);
+            dumpinfo.fd = -1;
+        }
 
         absolute_offset += offset - SNIF_PCAP_HSIZE;
         total_filled_mem += offset;
@@ -387,7 +392,8 @@ dump_packet(unsigned char *user, const struct pcap_pkthdr *h,
         total_filled_mem = used_space();
         if (total_filled_mem + offset + h->caplen >= dumpinfo.total_size)
         {
-            fcntl(dumpinfo.fd, F_SETLK, &lock);
+            if (dumpinfo.fd != -1)
+                fcntl(dumpinfo.fd, F_SETLK, &lock);
             if (dumpinfo.overfilltype == ROTATION)
             {
                 if (file_list_rm_first() == -1)
@@ -402,7 +408,8 @@ dump_packet(unsigned char *user, const struct pcap_pkthdr *h,
     pcap_dump((unsigned char *)dumpinfo.dumper, h, sp);
     pcap_dump_flush(dumpinfo.dumper);
 
-    fcntl(dumpinfo.fd, F_SETLK, &lock);
+    if (dumpinfo.fd != -1)
+        fcntl(dumpinfo.fd, F_SETLK, &lock);
 }
 
 
@@ -524,6 +531,8 @@ global_init(void)
     dumpinfo.log_num            = 0;
     dumpinfo.max_fnum           = 0;
     dumpinfo.overfilltype       = ROTATION;
+    dumpinfo.dumper             = NULL;
+    dumpinfo.fd                 = -1;
 
     total_filled_mem            = 0;
     fstop                       = 0;
@@ -546,6 +555,7 @@ te_sniffer_process(int argc, char *argv[])
     struct bpf_program   fp;                  /* The compiled filter */
     bool pflag = 0;  /* Promiscuous mode flag */
     int                  op;
+    int                  loop_rc;
 
     struct sigaction act;
 
@@ -710,10 +720,22 @@ te_sniffer_process(int argc, char *argv[])
                   "The sniffer process has been started.", &ts);
 
     while (!fstop)
-        pcap_loop(handle, 0, dump_packet, NULL);
+    {
+        loop_rc = pcap_loop(handle, 0, dump_packet, NULL);
+        if (loop_rc == 0)
+            continue;
+        if (loop_rc == PCAP_ERROR_BREAK)
+            break;
 
-    insert_marker((FILE *)dumpinfo.dumper,
-                  "Shutting down the sniffer process.", NULL);
+        fprintf(stderr, "pcap_loop() failed: %s\n", pcap_geterr(handle));
+        break;
+    }
+
+    if (dumpinfo.dumper != NULL)
+    {
+        insert_marker((FILE *)dumpinfo.dumper,
+                      "Shutting down the sniffer process.", NULL);
+    }
 
 cleanup:
     if (dumpinfo.dumper != NULL)
