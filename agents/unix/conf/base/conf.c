@@ -274,6 +274,7 @@ extern te_errno ta_unix_conf_bridge_init(void);
 extern te_errno ta_unix_conf_block_dev_init(void);
 extern te_errno ta_unix_conf_l4_port_init(void);
 extern te_errno ta_unix_conf_eth_xstats_init(void);
+extern te_errno ta_unix_conf_irq_stats_init(void);
 
 extern te_errno ta_unix_conf_key_init(void);
 extern void ta_unix_conf_key_fini(void);
@@ -1462,6 +1463,9 @@ rcf_ch_conf_init(void)
             goto fail;
 
         if (ta_unix_conf_eth_xstats_init() != 0)
+            goto fail;
+
+        if (ta_unix_conf_irq_stats_init() != 0)
             goto fail;
 
         if (ta_unix_conf_iommu_init() != 0)
