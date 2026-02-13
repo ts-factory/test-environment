@@ -126,6 +126,10 @@ endif
 if conf.contains('upnp_cp')
     c_args += [ '-DWITH_UPNP_CP' ]
 endif
+if conf.contains('wifi')
+    c_args += [ '-DWITH_WIFI' ]
+endif
+
 if conf.contains('tc')
     c_args += [ '-DWITH_TC' ]
     includes += include_directories('tc')

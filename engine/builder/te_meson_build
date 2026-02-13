@@ -356,6 +356,8 @@ process_agent_unix_parms() {
                 conf="${conf} upnp_cp" ;;
             --with-vcm)
                 conf="${conf} vcm" ;;
+            --with-wifi)
+                conf="${conf} wifi" ;;
             --without-static-libc)
                 # default, in fact --with-static-libc is not supported yet
                 ;;

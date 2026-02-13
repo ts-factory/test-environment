@@ -336,6 +336,10 @@ extern te_errno ta_unix_conf_loadavg_init(void);
 # include "conf_upnp_cp.h"
 #endif /* WITH_UPNP_CP */
 
+#ifdef WITH_WIFI
+#include "ta_wifi.h"
+#endif /* WITH_WIFI */
+
 /**
  * Determine family of the address in string representation.
  *
@@ -1500,6 +1504,14 @@ rcf_ch_conf_init(void)
             goto fail;
         }
 #endif /* WITH_UPNP_CP */
+
+#ifdef WITH_WIFI
+        if (ta_unix_conf_wifi_init() != 0)
+        {
+            ERROR("Failed to add WiFi configuration subtree");
+            goto fail;
+        }
+#endif /* WITH_WIFI */
 
 #ifdef WITH_SOCKS
         if (ta_unix_conf_socks_init() != 0)
