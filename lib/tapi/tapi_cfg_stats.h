@@ -33,6 +33,11 @@ extern "C" {
 #define TAPI_CFG_MAX_XSTAT_NAME 32
 
 /**
+ * Maximum lenght for IRQ name in /proc/interrupts
+ */
+#define TAPI_CFG_MAX_IRQ_NAME 32
+
+/**
  * @defgroup tapi_conf_stats Network statistics access
  * @ingroup tapi_conf
  * @{
@@ -61,6 +66,17 @@ typedef struct tapi_cfg_if_xstats {
     size_t num; /**< Number of statistics */
     tapi_cfg_if_xstat *xstats;
 } tapi_cfg_if_xstats;
+
+typedef struct tapi_cfg_if_irq_per_cpu {
+    unsigned int cpu;
+    uint64_t     num;
+} tapi_cfg_if_irq_per_cpu;
+
+typedef struct tapi_cfg_if_irq_stats {
+    unsigned int  irq_num;
+    char         *name;
+    te_vec        irq_per_cpu;
+} tapi_cfg_if_irq_stats;
 
 typedef struct tapi_cfg_net_stats_ipv4{
     uint64_t      in_recvs;
@@ -202,6 +218,52 @@ extern te_errno tapi_cfg_stats_if_xstats_print_diff(
 extern te_errno tapi_cfg_stats_if_xstats_print(const char          *ta,
                                                const char          *ifname,
                                                tapi_cfg_if_xstats  *xstats);
+
+/**
+ * Release sources grabbed for IRQ per CPU statistics.
+ */
+extern te_vec_item_destroy_fn tapi_cfg_stats_free_irqs_vec;
+
+/**
+ * Get IRQ per CPU statistics for the certain network interface.
+ *
+ * @param ta            Test Agent to gather statistics on
+ * @param ifname        Network interface to gather statistics of
+ * @param irq_stats     Resulted IRQ per CPU statistics structure
+ *
+ * @return Status code
+ */
+extern te_errno tapi_cfg_stats_if_irq_stats_get(const char *ta,
+                                                const char *ifname,
+                                                te_vec     *irq_stats);
+
+/**
+ * Print IRQ per CPU difference with provided description.
+ *
+ * @param stats         IRQ per CPU statistics
+ * @param prev          Previous IRQ per CPU statistics @c NULL
+ * @param descr_fmt     Description format string with arguments
+ *
+ * @return Status code
+ */
+extern te_errno tapi_cfg_stats_if_irq_print_diff(const te_vec *stats,
+                                                 const te_vec *prev,
+                                                 const char *descr_fmt, ...)
+                                                 TE_LIKE_PRINTF(3, 4);
+
+/**
+ * Print IRQ per CPU statistics for the certain network interface.
+ *
+ * @param ta            Test Agent to gather statistics on
+ * @param ifname        Network interface to gather statistics of
+ * @param irq_stats     Gathered IRQ per CPU interface statistics structure
+ *                      to print
+ *
+ * @return Status code
+ */
+extern te_errno tapi_cfg_stats_if_irq_print(const char *ta,
+                                            const char *ifname,
+                                            te_vec     *irq_stats);
 
 /**
  * Get /proc/net/snmp like statistics for the host,

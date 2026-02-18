@@ -512,6 +512,7 @@ tapi_env_free(tapi_env *env)
         CIRCLEQ_REMOVE(&env->ifs, iface, links);
         te_vec_free(&iface->stats);
         te_vec_free(&iface->xstats);
+        te_vec_free(&iface->irq_stats);
         if (iface->sniffer_id != NULL)
             (void)tapi_sniffer_del(iface->sniffer_id);
         free(iface->if_info.if_name);

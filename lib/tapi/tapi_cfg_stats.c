@@ -48,6 +48,23 @@
 #define _U64_FMT " " U64_FMT
 #define _I64_FMT " " I64_FMT
 
+
+typedef struct tapi_cfg_if_irq_per_cpu_diff {
+    unsigned int  cpu;
+    bool          old;
+    bool          new;
+    uint64_t      old_num;
+    uint64_t      new_num;
+} tapi_cfg_if_irq_per_cpu_diff;
+
+typedef struct tapi_cfg_if_irq_stats_diff {
+    unsigned int   irq_num;
+    char          *name;
+    bool           old;
+    bool           new;
+    te_vec         diff_irq_per_cpu;
+} tapi_cfg_if_irq_stats_diff;
+
 struct tapi_cfg_if_xstat_diff {
     char          name[TAPI_CFG_MAX_XSTAT_NAME];
     bool          old;
@@ -230,6 +247,258 @@ tapi_cfg_stats_if_xstats_get(const char         *ta,
 
     return rc;
 }
+
+void
+tapi_cfg_stats_free_irqs_vec(const void *data)
+{
+    const te_vec *vec = data;
+    const tapi_cfg_if_irq_stats *irq_stats_obj;
+    const te_dbuf *dbuf = &vec->data;
+
+    TE_VEC_FOREACH(vec, irq_stats_obj)
+    {
+        dbuf = &irq_stats_obj->irq_per_cpu.data;
+        te_vec_item_free_ptr(dbuf);
+        free(irq_stats_obj->name);
+    }
+    dbuf = &vec->data;
+    te_vec_item_free_ptr(dbuf);
+}
+
+static void
+tapi_cfg_stats_free_irqs_diff(te_vec *vec)
+{
+    tapi_cfg_if_irq_stats_diff *irq_diff_obj;
+
+    TE_VEC_FOREACH(vec, irq_diff_obj)
+    {
+        te_vec_free(&irq_diff_obj->diff_irq_per_cpu);
+    }
+    te_vec_free(vec);
+}
+
+static int
+compare_irqs(const void *obj1, const void *obj2)
+{
+    const tapi_cfg_if_irq_stats *r1 = obj1;
+    const tapi_cfg_if_irq_stats *r2 = obj2;
+
+    return (int)r1->irq_num - (int)r2->irq_num;
+}
+
+static int
+compare_ipc(const void *obj1, const void *obj2)
+{
+    const tapi_cfg_if_irq_per_cpu *r1 = obj1;
+    const tapi_cfg_if_irq_per_cpu *r2 = obj2;
+
+    return (int)r1->cpu - (int)r2->cpu;
+}
+
+static void
+tapi_cfg_stats_sort_irqs_vec(te_vec *irqs_vec)
+{
+    tapi_cfg_if_irq_stats *irq_stats_obj;
+
+    te_vec_sort(irqs_vec, &compare_irqs);
+    TE_VEC_FOREACH(irqs_vec, irq_stats_obj)
+    {
+        te_vec_sort(&irq_stats_obj->irq_per_cpu, &compare_ipc);
+    }
+}
+
+/* See description in tapi_cfg_stats.h */
+te_errno
+tapi_cfg_stats_if_irq_stats_get(const char *ta,
+                                const char *ifname,
+                                te_vec     *irq_stats)
+{
+    te_errno rc;
+    unsigned int n_irqs;
+    cfg_handle *irq_handles = NULL;
+    cfg_handle *cpu_handles = NULL;
+    tapi_cfg_if_irq_stats irq_stat = { .name = NULL };
+    int i;
+
+    VERB("%s(ta=%s, ifname=%s, irq_stats=%x) started",
+         __FUNCTION__, ta, ifname, irq_stats);
+
+    if (irq_stats == NULL || ifname == NULL || ta == NULL)
+    {
+        ERROR("%s(): ta, ifname or irq_stats is NULL!", __FUNCTION__);
+        return TE_RC(TE_TAPI, TE_EINVAL);
+    }
+
+    VERB("%s(): irq_stats=%x", __FUNCTION__, irq_stats);
+
+    *irq_stats = TE_VEC_INIT(tapi_cfg_if_irq_stats);
+    irq_stat.irq_per_cpu = TE_VEC_INIT(tapi_cfg_if_irq_per_cpu);
+
+    /*
+     * Synchronize configuration trees and get assigned interfaces
+     */
+
+    VERB("Try to sync irq subtree.");
+    rc = cfg_synchronize_fmt(true, "/agent:%s/interface:%s/irq:",
+                             ta, ifname);
+    if (rc != 0)
+        goto cleanup;
+
+    VERB("Get irq stats counters");
+    rc = cfg_find_pattern_fmt(&n_irqs, &irq_handles,
+                              "/agent:%s/interface:%s/irq:*",
+                              ta, ifname);
+    if ((rc != 0 && TE_RC_GET_ERROR(rc) == TE_ENOENT) ||
+        (rc == 0 && n_irqs == 0))
+        return 0;
+    if (rc != 0)
+    {
+        ERROR("cfg_find_pattern_fmt(/agent/interface/irq/) failed %r", rc);
+        goto cleanup;
+    }
+
+    for (i = 0; i < n_irqs; i++)
+    {
+        char *irq_oid;
+        unsigned int n_cpus;
+        char *irq_num_str;
+        int j;
+
+        /* Get net OID as string */
+        rc = cfg_get_oid_str(irq_handles[i], &irq_oid);
+        if (rc != 0)
+        {
+            ERROR("%s(): cfg_get_oid_str() failed %r", __FUNCTION__, rc);
+            break;
+        }
+
+        rc = cfg_get_string(&irq_stat.name, "%s/name:", irq_oid);
+        if (rc != 0)
+        {
+            ERROR("%s(): failed to get value for %s/name", __FUNCTION__,
+                  irq_oid);
+            free(irq_oid);
+            break;
+        }
+
+        irq_num_str = cfg_oid_str_get_inst_name(irq_oid, -1);
+        if (irq_num_str == NULL)
+        {
+            ERROR("%s(): Failed to get the last instance name from OID '%s'",
+                  __FUNCTION__, irq_oid);
+            free(irq_oid);
+            rc = TE_RC(TE_TAPI, TE_EFAULT);
+            break;
+        }
+
+        rc = te_strtoui(irq_num_str, 10, &irq_stat.irq_num);
+        free(irq_num_str);
+        if (rc != 0)
+        {
+            ERROR("%s(): Failed to convert the last instance name for OID '%s'",
+                  __FUNCTION__, irq_oid);
+            free(irq_oid);
+            rc = TE_RC(TE_TAPI, rc);
+            break;
+        }
+
+        rc = cfg_find_pattern_fmt(&n_cpus, &cpu_handles, "%s/cpu:*", irq_oid);
+        free(irq_oid);
+        if ((rc != 0 && TE_RC_GET_ERROR(rc) == TE_ENOENT) ||
+            (rc == 0 && n_cpus == 0))
+            continue;
+
+        if (rc != 0)
+        {
+            ERROR("cfg_find_pattern_fmt(/agent/interface/irq/cpu) failed %r",
+                  rc);
+            break;
+        }
+
+        for (j = 0; j < n_cpus; j++)
+        {
+            char *cpu_oid;
+            char *cpu_num_str;
+            tapi_cfg_if_irq_per_cpu irq_per_cpu;
+
+            /* Get net OID as string */
+            rc = cfg_get_oid_str(cpu_handles[j], &cpu_oid);
+            if (rc != 0)
+            {
+                ERROR("%s(): cfg_get_oid_str() failed %r", __FUNCTION__, rc);
+                break;
+            }
+
+            rc = cfg_get_uint64(&irq_per_cpu.num, "%s", cpu_oid);
+            if (rc != 0)
+            {
+                ERROR("%s(): failed to get value for '%s'", __FUNCTION__,
+                      cpu_oid);
+                free(cpu_oid);
+                goto cleanup;
+            }
+
+            cpu_num_str = cfg_oid_str_get_inst_name(cpu_oid, -1);
+            if (cpu_num_str == NULL)
+            {
+                ERROR("%s(): Failed to get the last instance name from OID "
+                      "'%s'", __FUNCTION__, cpu_oid);
+                free(cpu_oid);
+                rc = TE_RC(TE_TAPI, TE_EFAULT);
+                goto cleanup;
+            }
+
+            rc = te_strtoui(cpu_num_str, 10, &irq_per_cpu.cpu);
+            free(cpu_num_str);
+            free(cpu_oid);
+            if (rc != 0)
+            {
+                ERROR("%s(): Failed to convert the last instance name for OID "
+                      "'%s'", __FUNCTION__, cpu_oid);
+                rc = TE_RC(TE_TAPI, rc);
+                goto cleanup;
+            }
+            rc = TE_VEC_APPEND(&irq_stat.irq_per_cpu, irq_per_cpu);
+            if (rc != 0)
+            {
+                ERROR("%s(): Failed to add irq per cpu stats to te_vec.",
+                      __FUNCTION__);
+                rc = TE_RC(TE_TAPI, rc);
+                goto cleanup;
+            }
+        }
+
+        rc = TE_VEC_APPEND(irq_stats, irq_stat);
+        if (rc != 0)
+        {
+            ERROR("%s(): Failed to add irq stats instance to te_vec.",
+                  __FUNCTION__);
+            rc = TE_RC(TE_TAPI, rc);
+            break;
+        }
+        /**
+         * This pointer now in 'irq_per_cpu' vector, so we don't need it to
+         * delete it at cleanup.
+         */
+        irq_stat.name = NULL;
+        irq_stat.irq_per_cpu = TE_VEC_INIT(tapi_cfg_if_irq_per_cpu);
+        free(cpu_handles);
+        cpu_handles = NULL;
+    }
+
+    tapi_cfg_stats_sort_irqs_vec(irq_stats);
+
+cleanup:
+    free(irq_handles);
+    free(cpu_handles);
+    free(irq_stat.name);
+    te_vec_free(&irq_stat.irq_per_cpu);
+    if (rc != 0)
+        tapi_cfg_stats_free_irqs_vec(irq_stats);
+
+    return rc;
+}
+
 
 /* See description in tapi_cfg_stats.h */
 te_errno
@@ -486,6 +755,50 @@ tapi_cfg_stats_if_xstats_print(const char          *ta,
 }
 
 static void
+tapi_cfg_stats_if_irq_print_with_descr(const te_vec *irq_stats,
+                                       const char *descr_fmt, ...)
+{
+    va_list ap;
+    te_string buf = TE_STRING_INIT;
+    const tapi_cfg_if_irq_stats *irq_stats_obj;
+    const tapi_cfg_if_irq_per_cpu *irq_per_cpu;
+
+    va_start(ap, descr_fmt);
+    te_string_append_va(&buf, descr_fmt, ap);
+    va_end(ap);
+
+    TE_VEC_FOREACH(irq_stats, irq_stats_obj)
+    {
+        TE_VEC_FOREACH(&irq_stats_obj->irq_per_cpu, irq_per_cpu)
+        {
+            te_string_append(&buf, "\n  IRQ:%u(%s) CPU:%u : " U64_FMT,
+                             irq_stats_obj->irq_num, irq_stats_obj->name,
+                             irq_per_cpu->cpu, irq_per_cpu->num);
+        }
+    }
+
+    RING("%s", te_string_value(&buf));
+
+    te_string_free(&buf);
+}
+
+/* See description in tapi_cfg_stats.h */
+te_errno
+tapi_cfg_stats_if_irq_print(const char *ta,
+                            const char *ifname,
+                            te_vec     *irq_stats)
+{
+    if (irq_stats == NULL)
+        return TE_RC(TE_TAPI, TE_EINVAL);
+
+    tapi_cfg_stats_if_irq_print_with_descr(irq_stats,
+        "Network extended statistics for interface %s on Test Agent %s:",
+        ifname, ta);
+
+    return 0;
+}
+
+static void
 tapi_cfg_if_stats_diff(tapi_cfg_if_stats *diff,
                        const tapi_cfg_if_stats *stats,
                        const tapi_cfg_if_stats *prev)
@@ -613,6 +926,208 @@ tapi_cfg_stats_if_xstats_print_diff(const tapi_cfg_if_xstats *stats,
     free(diff);
     return 0;
 }
+
+static void
+tapi_cfg_if_irq_diff_per_cpu(const te_vec *new_ipc_vec,
+                             const te_vec *old_ipc_vec,
+                             te_vec *diff_ipc_vec)
+{
+
+    const tapi_cfg_if_irq_per_cpu *ipc;
+    const tapi_cfg_if_irq_per_cpu *aux_ipc;
+    tapi_cfg_if_irq_per_cpu_diff ipc_diff_val;
+
+    *diff_ipc_vec = TE_VEC_INIT(tapi_cfg_if_irq_per_cpu_diff);
+
+    if (new_ipc_vec != NULL)
+    {
+        TE_VEC_FOREACH(new_ipc_vec, ipc)
+        {
+            unsigned int ipc_pos;
+            bool ipc_found = false;
+
+            if (old_ipc_vec != NULL)
+                ipc_found = te_vec_search(old_ipc_vec, ipc,
+                                          &compare_ipc, &ipc_pos, NULL);
+            ipc_diff_val.cpu = ipc->cpu;
+            ipc_diff_val.new = true;
+            ipc_diff_val.old = ipc_found;
+            ipc_diff_val.new_num = ipc->num;
+            if (ipc_found)
+            {
+                aux_ipc = te_vec_get(old_ipc_vec, ipc_pos);
+                ipc_diff_val.old_num = aux_ipc->num;
+            }
+            TE_VEC_APPEND(diff_ipc_vec, ipc_diff_val);
+        }
+    }
+    if (old_ipc_vec == NULL)
+        return;
+
+    TE_VEC_FOREACH(old_ipc_vec, ipc)
+    {
+        unsigned int ipc_pos;
+        bool ipc_found = false;
+
+        if (new_ipc_vec != NULL)
+        {
+            ipc_found = te_vec_search(new_ipc_vec, ipc,
+                                      &compare_ipc, &ipc_pos, NULL);
+            if (ipc_found)
+                continue;
+        }
+        ipc_diff_val.cpu = ipc->cpu;
+        ipc_diff_val.new = false;
+        ipc_diff_val.old = true;
+        ipc_diff_val.old_num = ipc->num;
+        TE_VEC_APPEND(diff_ipc_vec, ipc_diff_val);
+    }
+}
+
+static void
+tapi_cfg_if_irq_diff(const te_vec *new_irq_stats,
+                     const te_vec *old_irq_stats,
+                     te_vec *diff)
+{
+    const tapi_cfg_if_irq_stats *irq_stats_obj;
+    const tapi_cfg_if_irq_stats *aux_irq_stats_obj;
+    tapi_cfg_if_irq_stats_diff diff_val;
+
+    TE_VEC_FOREACH(new_irq_stats, irq_stats_obj)
+    {
+        unsigned int irq_pos;
+        bool irq_found = false;
+
+        if (old_irq_stats != NULL)
+            irq_found = te_vec_search(old_irq_stats, irq_stats_obj,
+                                      &compare_irqs, &irq_pos, NULL);
+        diff_val.irq_num = irq_stats_obj->irq_num;
+        diff_val.name = irq_stats_obj->name;
+        diff_val.new = true;
+        diff_val.old = irq_found;
+        if (irq_found)
+        {
+            aux_irq_stats_obj = te_vec_get(old_irq_stats, irq_pos);
+            tapi_cfg_if_irq_diff_per_cpu(&irq_stats_obj->irq_per_cpu,
+                                         &aux_irq_stats_obj->irq_per_cpu,
+                                         &diff_val.diff_irq_per_cpu);
+        }
+        else
+        {
+            tapi_cfg_if_irq_diff_per_cpu(&irq_stats_obj->irq_per_cpu, NULL,
+                                         &diff_val.diff_irq_per_cpu);
+        }
+        TE_VEC_APPEND(diff, diff_val);
+    }
+
+    if (old_irq_stats == NULL)
+        return;
+
+    TE_VEC_FOREACH(old_irq_stats, irq_stats_obj)
+    {
+        unsigned int irq_pos;
+        bool irq_found;
+
+        irq_found = te_vec_search(new_irq_stats, irq_stats_obj,
+                                  &compare_irqs, &irq_pos, NULL);
+        if (irq_found)
+            continue;
+        diff_val.irq_num = irq_stats_obj->irq_num;
+        diff_val.name = irq_stats_obj->name;
+        diff_val.new = false;
+        diff_val.old = true;
+        tapi_cfg_if_irq_diff_per_cpu(NULL, &irq_stats_obj->irq_per_cpu,
+                                     &diff_val.diff_irq_per_cpu);
+        TE_VEC_APPEND(diff, diff_val);
+    }
+}
+
+static void
+tapi_cfg_stats_if_irq_print_diff_va(te_vec *diff, const char *descr_fmt,
+                                    va_list ap)
+{
+    tapi_cfg_if_irq_stats_diff *diff_irq;
+    tapi_cfg_if_irq_per_cpu_diff *diff_ipc;
+    te_string buf = TE_STRING_INIT;
+
+    te_string_append_va(&buf, descr_fmt, ap);
+
+    TE_VEC_FOREACH(diff, diff_irq)
+    {
+        TE_VEC_FOREACH(&diff_irq->diff_irq_per_cpu, diff_ipc)
+        {
+            if (diff_irq->new && diff_irq->old)
+            {
+                if (diff_ipc->new && diff_ipc->old)
+                {
+                    uint64_t diff_val;
+
+                    diff_val = diff_ipc->new_num - diff_ipc->old_num;
+                    if (diff_val == 0)
+                        continue;
+
+                    te_string_append(&buf, "\n  IRQ:%u(%s) CPU:%u : " U64_FMT,
+                                    diff_irq->irq_num, diff_irq->name,
+                                    diff_ipc->cpu, diff_val);
+                }
+                else if (diff_ipc->new)
+                {
+                    te_string_append(&buf,
+                                     "\n  IRQ:%u(%s) CPU(new):%u : " U64_FMT,
+                                     diff_irq->irq_num, diff_irq->name,
+                                     diff_ipc->cpu, diff_ipc->new_num);
+                }
+                else if (diff_ipc->old)
+                {
+                    te_string_append(&buf,
+                                     "\n  IRQ:%u(%s) CPU(old):%u : " U64_FMT,
+                                     diff_irq->irq_num, diff_irq->name,
+                                     diff_ipc->cpu, diff_ipc->old_num);
+                }
+            }
+            else if(diff_irq->new)
+            {
+                te_string_append(&buf, "\n  IRQ(new):%u(%s) CPU:%u : " U64_FMT,
+                                 diff_irq->irq_num, diff_irq->name,
+                                 diff_ipc->cpu, diff_ipc->new_num);
+            }
+            else
+            {
+                te_string_append(&buf, "\n  IRQ(old):%u(%s) CPU:%u : " U64_FMT,
+                                 diff_irq->irq_num, diff_irq->name,
+                                 diff_ipc->cpu, diff_ipc->old_num);
+            }
+        }
+    }
+
+    RING("%s", te_string_value(&buf));
+
+    te_string_free(&buf);
+}
+
+
+te_errno
+tapi_cfg_stats_if_irq_print_diff(const te_vec *stats,
+                                 const te_vec *prev,
+                                 const char *descr_fmt, ...)
+{
+    te_vec diff;
+    va_list ap;
+
+    if (stats == NULL || descr_fmt == NULL)
+        return TE_RC(TE_TAPI, TE_EINVAL);
+
+    diff = TE_VEC_INIT(tapi_cfg_if_irq_stats_diff);
+    tapi_cfg_if_irq_diff(stats, prev, &diff);
+
+    va_start(ap, descr_fmt);
+    tapi_cfg_stats_if_irq_print_diff_va(&diff, descr_fmt, ap);
+    va_end(ap);
+    tapi_cfg_stats_free_irqs_diff(&diff);
+
+    return 0;
+}
+
 
 static void
 tapi_cfg_stats_net_stats_print_with_descr_va(const tapi_cfg_net_stats *stats,

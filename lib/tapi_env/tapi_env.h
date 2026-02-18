@@ -449,6 +449,7 @@ typedef struct tapi_env_if {
 
     te_vec  stats;  /**< Network interface statistics */
     te_vec  xstats; /**< Network interface ethtool statistics */
+    te_vec  irq_stats; /**< IRQ per CPU network interface statistics */
 
 } tapi_env_if;
 

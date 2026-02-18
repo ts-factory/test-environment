@@ -99,6 +99,8 @@ create_host_if(void)
     iface->stats = TE_VEC_INIT(struct tapi_cfg_if_stats);
     iface->xstats = TE_VEC_INIT_DESTROY(struct tapi_cfg_if_xstats,
                                         destroy_xstats);
+    iface->irq_stats = TE_VEC_INIT_DESTROY(te_vec,
+                                           tapi_cfg_stats_free_irqs_vec);
 
     return iface;
 }

@@ -39,6 +39,7 @@ tapi_env_stats_gather(tapi_env *env)
     {
         tapi_cfg_if_stats *stats;
         tapi_cfg_if_xstats *xstats;
+        te_vec *irq_stats;
 
         if (iface->rsrc_type != NET_NODE_RSRC_TYPE_INTERFACE)
             continue;
@@ -46,6 +47,9 @@ tapi_env_stats_gather(tapi_env *env)
         stats = te_vec_replace(&iface->stats, te_vec_size(&iface->stats), NULL);
         xstats = te_vec_replace(&iface->xstats, te_vec_size(&iface->xstats),
                                 NULL);
+        irq_stats = te_vec_replace(&iface->irq_stats,
+                                   te_vec_size(&iface->irq_stats),
+                                   NULL);
 
         rc = tapi_cfg_stats_if_stats_get(iface->host->ta,
                                          iface->if_info.if_name, stats);
@@ -53,6 +57,12 @@ tapi_env_stats_gather(tapi_env *env)
             return rc;
         rc = tapi_cfg_stats_if_xstats_get(iface->host->ta,
                                           iface->if_info.if_name, xstats);
+        if (rc != 0)
+            return rc;
+
+        rc = tapi_cfg_stats_if_irq_stats_get(iface->host->ta,
+                                             iface->if_info.if_name,
+                                             irq_stats);
         if (rc != 0)
             return rc;
     }
@@ -90,10 +100,13 @@ tapi_env_stats_log_diff(tapi_env *env)
     {
         size_t n_stats = te_vec_size(&iface->stats);
         size_t n_xstats = te_vec_size(&iface->xstats);
+        size_t n_irq_stats = te_vec_size(&iface->irq_stats);
         const tapi_cfg_if_stats *prev;
         const tapi_cfg_if_stats *last;
         const tapi_cfg_if_xstats *xprev;
         const tapi_cfg_if_xstats *xlast;
+        const te_vec *irq_prev;
+        const te_vec *irq_last;
 
         if (iface->rsrc_type != NET_NODE_RSRC_TYPE_INTERFACE)
             continue;
@@ -118,6 +131,19 @@ tapi_env_stats_log_diff(tapi_env *env)
 
             rc = tapi_cfg_stats_if_xstats_print_diff(xlast, xprev,
                     "Interface '%s' (%s) extended stats diff on "
+                    "host '%s' (TA %s)", iface->name, iface->if_info.if_name,
+                    iface->host->name, iface->host->ta);
+            if (rc != 0)
+                return rc;
+        }
+        if (n_irq_stats != 0)
+        {
+            irq_last = te_vec_get(&iface->irq_stats, n_irq_stats - 1);
+            irq_prev = n_irq_stats > 1 ? te_vec_get(&iface->irq_stats,
+                                                    n_irq_stats - 2) : NULL;
+
+            rc = tapi_cfg_stats_if_irq_print_diff(irq_last, irq_prev,
+                    "Interface '%s' (%s) IRQ per CPU stats diff on "
                     "host '%s' (TA %s)", iface->name, iface->if_info.if_name,
                     iface->host->name, iface->host->ta);
             if (rc != 0)
