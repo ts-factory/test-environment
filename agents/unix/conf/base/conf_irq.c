@@ -139,7 +139,7 @@ get_legacy_irq(const char *if_name)
     snprintf(path, sizeof(path), "/sys/class/net/%s/device/irq", if_name);
 
     f = fopen(path, "r");
-    if (f != NULL)
+    if (f == NULL)
         return 0;
 
     if (fscanf(f, "%u", &irq_num) != 1)
