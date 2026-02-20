@@ -171,6 +171,10 @@ get_irqs(const char *if_name, te_vec *irqs)
     dir = opendir(path);
     if (dir == NULL)
     {
+        /* Virtual interfaces may have no own IRQ source. */
+        if (errno == ENOENT || errno == ENODEV || errno == ENOTDIR)
+            return 0;
+
         if (old_added)
             return 0;
         else
@@ -293,6 +297,14 @@ ta_irq_fill_objs(unsigned int gid, const char *if_name)
     rc = get_irqs(if_name, result_irqs);
     if (rc != 0)
         goto cleanup;
+
+    if (te_vec_size(result_irqs) == 0)
+    {
+        rc = ta_obj_add(TA_OBJ_TYPE_IF_IRQ,
+                        te_string_value(&obj_name),
+                        "", gid, result_irqs, &free_irqs_vec, &obj);
+        goto cleanup;
+    }
 
     f = fopen("/proc/interrupts", "r");
     if (f == NULL)
