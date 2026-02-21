@@ -46,7 +46,7 @@
 
 /** Default QEMU emulated machine */
 #define VM_MACHINE_DEFAULT  \
-    "pc-i440fx-2.8,usb=off,vmport=off,dump-guest-core=off"
+    "pc,usb=off,vmport=off,dump-guest-core=off"
 
 /** Default management network device */
 #define VM_MGMT_NET_DEVICE_DEFAULT  "virtio-net-pci"
