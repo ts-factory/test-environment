@@ -129,6 +129,20 @@ add_irq_obj(te_vec *irqs_vec, unsigned int irq_num)
     TE_VEC_APPEND(irqs_vec, irq_obj);
 }
 
+static te_errno
+del_irq_obj(te_vec *irqs_vec, unsigned int irq_num)
+{
+    unsigned int index = 0;
+    bool found = false;
+
+    found = te_vec_search(irqs_vec, &irq_num, &search_irqs, &index, NULL);
+    if (!found)
+        return TE_RC(TE_TA_UNIX, TE_ENOENT);
+
+    te_vec_remove_index(irqs_vec, index);
+    return 0;
+}
+
 static unsigned int
 get_legacy_irq(const char *if_name)
 {
@@ -349,10 +363,18 @@ ta_irq_fill_objs(unsigned int gid, const char *if_name)
             {
                 if (rewind_is_done)
                 {
-                    ERROR("Failed to find IRQ:%u in /proc/interrupts.",
-                          irq_obj->irq_num);
-                    rc = TE_RC(TE_TA_UNIX, TE_EINVAL);
-                    goto cleanup;
+                    INFO("Failed to find IRQ:%u in /proc/interrupts.",
+                         irq_obj->irq_num);
+                    rc = del_irq_obj(result_irqs, irq_obj->irq_num);
+                    if (rc == 0)
+                    {
+                        rewind(f);
+                        continue;
+                    }
+                    else
+                    {
+                        goto cleanup;
+                    }
                 }
                 else
                 {
