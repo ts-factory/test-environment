@@ -65,6 +65,35 @@ xstat_list(unsigned int gid, const char *oid, const char *sub_id,
     UNUSED(oid);
 
     rc = ta_ethtool_get_strings_list(gid, if_name, ETH_SS_STATS, list);
+    if (rc != 0)
+    {
+        int failed_ethtool_cmd;
+
+        failed_ethtool_cmd = ta_ethtool_failed_cmd();
+
+        if (failed_ethtool_cmd < 0)
+        {
+            ERROR("%s(): error %r occurred while getting statistics for %s",
+                  __FUNCTION__, rc, if_name);
+        }
+        else if (rc != TE_RC(TE_TA_UNIX, TE_EOPNOTSUPP) ||
+                 failed_ethtool_cmd != ETHTOOL_GSTRINGS)
+        {
+            ERROR("%s(): error %r occurred while getting statistics for %s; "
+                  "failed SIOCETHTOOL command is %d (%s)", __FUNCTION__, rc,
+                  if_name, failed_ethtool_cmd,
+                  ta_ethtool_cmd2str(failed_ethtool_cmd));
+        }
+        else
+        {
+            /*
+             * If statistics are not supported, let Configurator
+             * think they are not present to avoid error messages.
+             */
+            *list = NULL;
+            rc = 0;
+        }
+    }
     return rc;
 }
 
