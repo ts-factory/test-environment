@@ -547,6 +547,79 @@ get_end_sum_udp_stat(const json_t *jrpt, tapi_perf_report_kind kind,
     return 0;
 }
 
+static int
+get_counts(json_t *jsum, double *tx_sec, double *rx_sec, double *old_sec,
+           uint64_t *tx_bytes, uint64_t *rx_bytes, uint64_t *old_bytes,
+           double *tx_bps, double *rx_bps, double *old_bps,
+           bool *zero_interval)
+{
+    json_t *jval;
+    double  tmp_seconds;
+    double  tmp_bps;
+    uint64_t bytes = 0;
+    bool sender;
+
+    if (!json_is_object(jsum))
+    {
+        /*
+         * This failure isn't fatal - iperf3 report can be
+         * incomplete. Skip the entry as there is nothing to retrieve data
+         * from
+         */
+        return -1;
+    }
+
+    jval = json_object_get(jsum, "sender");
+    if (json_is_boolean(jval))
+        sender = json_boolean_value(jval);
+    else
+        return -1;
+
+    jval = json_object_get(jsum, "seconds");
+    if (jsonvalue2double(jval, &tmp_seconds) != 0 ||
+        !json_is_integer(json_object_get(jsum, "bytes")) ||
+        jsonvalue2double(json_object_get(jsum, "bits_per_second"),
+                         &tmp_bps) != 0 ||
+        tmp_seconds < IPERF_MIN_REPRESENTATIVE_DURATION)
+    {
+        /*
+         * This failure isn't fatal - some of (or all) specifications are
+         * missing or invalid. Skip the entry as we won't be able to
+         * retrieve useful data from it
+         */
+        return -1;
+    }
+
+    jval = json_object_get(jsum, "bytes");
+    bytes = json_integer_value(jval);
+    if (bytes < 50)
+        *zero_interval = true;
+    else
+        *zero_interval = false;
+
+    if (old_sec != NULL)
+        *old_sec += tmp_seconds;
+    if (old_bytes != NULL)
+        *old_bytes += bytes;
+    if (old_bps != NULL)
+        *old_bps += tmp_bps * tmp_seconds;
+
+    if (sender)
+    {
+        *tx_sec += tmp_seconds;
+        *tx_bytes += bytes;
+        *tx_bps += tmp_bps * tmp_seconds;
+    }
+    else
+    {
+        *rx_sec += tmp_seconds;
+        *rx_bytes += bytes;
+        *rx_bps += tmp_bps * tmp_seconds;
+    }
+
+    return 0;
+}
+
 /*
  * Extract statistics report from JSON object.
  *
@@ -563,12 +636,18 @@ static te_errno
 get_report(const json_t *jrpt, tapi_perf_report_kind kind,
            tapi_perf_report *report)
 {
-    json_t *jend, *jsum, *jval, *jint;
+    json_t *jend, *jsum, *jval, *jint, *jrev;
     tapi_perf_report tmp_report = *report;
     size_t   i;
-    double   total_seconds = 0.0;
-    uint64_t total_bytes = 0;
-    double   total_bits_per_second = 0.0;
+    double   total_rx_seconds = 0.0;
+    double   total_tx_seconds = 0.0;
+    double   total_old_seconds = 0.0;
+    uint64_t total_rx_bytes = 0;
+    uint64_t total_tx_bytes = 0;
+    uint64_t total_old_bytes = 0;
+    double   total_rx_bits_per_second = 0.0;
+    double   total_tx_bits_per_second = 0.0;
+    double   total_old_bits_per_second = 0.0;
     const double eps = 0.00001;
     size_t   total_intervals = 0;
     size_t   zero_intervals = 0;
@@ -577,6 +656,14 @@ get_report(const json_t *jrpt, tapi_perf_report_kind kind,
     do {                                                        \
         ERROR("%s: JSON %s is expected", __FUNCTION__, _obj);   \
         return TE_RC(TE_TAPI, TE_EINVAL);                       \
+    } while (0)
+
+#define CALC_BPS(_count_pref)                                            \
+    do {                                                                \
+        if (_count_pref ## _seconds > eps)                              \
+            _count_pref ## _bits_per_second /= _count_pref ## _seconds; \
+        else                                                            \
+            _count_pref ## _bits_per_second /= 0.0;                     \
     } while (0)
 
     if (!json_is_object(jrpt))
@@ -595,10 +682,9 @@ get_report(const json_t *jrpt, tapi_perf_report_kind kind,
      */
     for (i = 0; i < json_array_size(jend); ++i)
     {
-        double  tmp_seconds;
-        double  tmp_bps;
         json_t *jsums;
-        uint64_t bytes = 0;
+        bool zero_intvl;
+        bool zero_intvl_reverse;
 
         jint = json_array_get(jend, i);
         jsums = json_object_get(jint, "sums");
@@ -633,57 +719,52 @@ get_report(const json_t *jrpt, tapi_perf_report_kind kind,
             jsum = json_object_get(jint, "sum");
         }
 
-        if (!json_is_object(jsum))
-        {
-            /*
-             * This failure isn't fatal - iperf3 report can be
-             * incomplete. Skip the entry as there is nothing to retrieve data
-             * from
-             */
+        if (get_counts(jsum, &total_tx_seconds, &total_rx_seconds,
+                       &total_old_seconds, &total_tx_bytes,
+                       &total_tx_bytes, &total_old_bytes,
+                       &total_tx_bits_per_second,
+                       &total_rx_bits_per_second,
+                       &total_old_bits_per_second,
+                       &zero_intvl) < 0)
             continue;
-        }
-
-        jval = json_object_get(jsum, "seconds");
-        if (jsonvalue2double(jval, &tmp_seconds) != 0 ||
-            !json_is_integer(json_object_get(jsum, "bytes")) ||
-            jsonvalue2double(json_object_get(jsum, "bits_per_second"),
-                             &tmp_bps) != 0 ||
-            tmp_seconds < IPERF_MIN_REPRESENTATIVE_DURATION)
-        {
-            /*
-             * This failure isn't fatal - some of (or all) specifications are
-             * missing or invalid. Skip the entry as we won't be able to
-             * retrieve useful data from it
-             */
-            continue;
-        }
-
-        total_seconds += tmp_seconds;
-
-        jval = json_object_get(jsum, "bytes");
-        bytes = json_integer_value(jval);
-        if (bytes < 50)
-            zero_intervals++;
-        total_bytes += bytes;
-
-        total_bits_per_second += tmp_bps * tmp_seconds;
 
         total_intervals++;
+        if (zero_intvl)
+            zero_intervals++;
+
+        jrev = json_object_get(jint, "sum_bidir_reverse");
+        if (!json_is_object(jrev))
+            continue;
+
+        if (get_counts(jrev, &total_tx_seconds, &total_rx_seconds, NULL,
+                       &total_tx_bytes, &total_tx_bytes, NULL,
+                       &total_tx_bits_per_second, &total_rx_bits_per_second,
+                       NULL, &zero_intvl_reverse) < 0)
+            continue;
+
+        if (!zero_intvl && zero_intvl_reverse)
+            zero_intervals++;
     }
 
     if (total_intervals == 0)
         GET_REPORT_ERROR("array of sane \"interval\" objects");
 
-    if (total_seconds < eps)
+    if (total_rx_seconds < eps && total_tx_seconds < eps)
         GET_REPORT_ERROR("object \"seconds\"");
 
-    total_bits_per_second /= total_seconds;
+    CALC_BPS(total_tx);
+    CALC_BPS(total_rx);
+    CALC_BPS(total_old);
 
-    tmp_report.seconds = total_seconds;
-    if (total_seconds < IPERF_MIN_REPRESENTATIVE_DURATION)
+    tmp_report.tx_seconds = total_tx_seconds;
+    tmp_report.rx_seconds = total_rx_seconds;
+    tmp_report.seconds = total_old_seconds;
+    if (total_rx_seconds < IPERF_MIN_REPRESENTATIVE_DURATION &&
+        total_tx_seconds < IPERF_MIN_REPRESENTATIVE_DURATION)
     {
-        WARN("%s: the retrieved interval of %.1f duration might be "
-             "unrepresentative", __FUNCTION__, total_seconds);
+        WARN("%s: the retrieved interval of tx:%.1f rx:%.1f duration might be "
+             "unrepresentative", __FUNCTION__, total_tx_seconds,
+             total_rx_seconds);
     }
 
     /* Estimate minimal per-thread bps */
@@ -693,12 +774,17 @@ get_report(const json_t *jrpt, tapi_perf_report_kind kind,
     if (get_end_sum_udp_stat(jrpt, kind, &tmp_report) != 0)
         return TE_RC(TE_TAPI, TE_EINVAL);
 
-    tmp_report.bytes = total_bytes;
-    tmp_report.bits_per_second = total_bits_per_second;
+    tmp_report.tx_bytes = total_tx_bytes;
+    tmp_report.rx_bytes = total_rx_bytes;
+    tmp_report.bytes = total_old_bytes;
+    tmp_report.tx_bits_per_second = total_tx_bits_per_second;
+    tmp_report.rx_bits_per_second = total_rx_bits_per_second;
+    tmp_report.bits_per_second = total_old_bits_per_second;
     tmp_report.zero_intervals = zero_intervals;
 
     *report = tmp_report;
     return 0;
+#undef CALC_BPS
 #undef GET_REPORT_ERROR
 }
 

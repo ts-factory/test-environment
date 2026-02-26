@@ -474,6 +474,12 @@ app_get_report(tapi_perf_app *app, tapi_perf_report_kind kind,
         report->bytes = tounit(bytes, bytes_unit, 1024);
         report->bits_per_second = tounit(throughput, throughput_unit, 1000);
         /* Not supported */
+        report->tx_seconds = 0;
+        report->rx_seconds = 0;
+        report->tx_bytes = 0;
+        report->rx_bytes = 0;
+        report->tx_bits_per_second = 0;
+        report->rx_bits_per_second = 0;
         report->zero_intervals = 0;
         report->min_bps_per_stream = 0;
         report->udp_packets = 0;

@@ -184,9 +184,20 @@ typedef enum tapi_perf_report_kind {
  * Network throughput test tool report.
  */
 typedef struct tapi_perf_report {
-    uint64_t bytes;         /**< Number of bytes was transmitted */
-    double seconds;         /**< Number of seconds was expired during test */
-    double bits_per_second; /**< Throughput */
+    uint64_t bytes;    /**< Number of bytes for iperf2 and backward
+                            compatibility */
+    uint64_t rx_bytes; /**< Number of bytes was received */
+    uint64_t tx_bytes; /**< Number of bytes was transmitted */
+    double seconds; /**< Number of seconds was expired during test for iper2 and
+                         backward compatibility */
+    double rx_seconds; /**< Number of seconds was expired during receive
+                            test */
+    double tx_seconds; /**< Number of seconds was expired during transmit
+                            test */
+    double bits_per_second; /**< Throughput for iperf2 and backward
+                                 compatibility */
+    double rx_bits_per_second; /**< Receive throughput */
+    double tx_bits_per_second; /**< Transmit throughput */
     size_t zero_intervals;  /**< Number of zero intervals */
     double min_bps_per_stream;  /**< Minimal rate observed for any stream at the
                                      end of report */
