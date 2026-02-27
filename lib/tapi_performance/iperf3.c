@@ -551,7 +551,7 @@ static int
 get_counts(json_t *jsum, double *tx_sec, double *rx_sec, double *old_sec,
            uint64_t *tx_bytes, uint64_t *rx_bytes, uint64_t *old_bytes,
            double *tx_bps, double *rx_bps, double *old_bps,
-           bool *zero_interval)
+           uint64_t *retransmits, bool *zero_interval)
 {
     json_t *jval;
     double  tmp_seconds;
@@ -596,6 +596,12 @@ get_counts(json_t *jsum, double *tx_sec, double *rx_sec, double *old_sec,
         *zero_interval = true;
     else
         *zero_interval = false;
+
+    if (json_is_integer(json_object_get(jsum, "retransmits")))
+    {
+        jval = json_object_get(jsum, "retransmits");
+        *retransmits += json_integer_value(jval);
+    }
 
     if (old_sec != NULL)
         *old_sec += tmp_seconds;
@@ -645,6 +651,7 @@ get_report(const json_t *jrpt, tapi_perf_report_kind kind,
     uint64_t total_rx_bytes = 0;
     uint64_t total_tx_bytes = 0;
     uint64_t total_old_bytes = 0;
+    uint64_t total_retransmits = 0;
     double   total_rx_bits_per_second = 0.0;
     double   total_tx_bits_per_second = 0.0;
     double   total_old_bits_per_second = 0.0;
@@ -724,7 +731,7 @@ get_report(const json_t *jrpt, tapi_perf_report_kind kind,
                        &total_tx_bytes, &total_old_bytes,
                        &total_tx_bits_per_second,
                        &total_rx_bits_per_second,
-                       &total_old_bits_per_second,
+                       &total_old_bits_per_second, &total_retransmits,
                        &zero_intvl) < 0)
             continue;
 
@@ -739,7 +746,7 @@ get_report(const json_t *jrpt, tapi_perf_report_kind kind,
         if (get_counts(jrev, &total_tx_seconds, &total_rx_seconds, NULL,
                        &total_tx_bytes, &total_tx_bytes, NULL,
                        &total_tx_bits_per_second, &total_rx_bits_per_second,
-                       NULL, &zero_intvl_reverse) < 0)
+                       NULL, &total_retransmits, &zero_intvl_reverse) < 0)
             continue;
 
         if (!zero_intvl && zero_intvl_reverse)
@@ -780,6 +787,7 @@ get_report(const json_t *jrpt, tapi_perf_report_kind kind,
     tmp_report.tx_bits_per_second = total_tx_bits_per_second;
     tmp_report.rx_bits_per_second = total_rx_bits_per_second;
     tmp_report.bits_per_second = total_old_bits_per_second;
+    tmp_report.retransmits = total_retransmits;
     tmp_report.zero_intervals = zero_intervals;
 
     *report = tmp_report;

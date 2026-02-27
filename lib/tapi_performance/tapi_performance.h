@@ -201,6 +201,7 @@ typedef struct tapi_perf_report {
     size_t zero_intervals;  /**< Number of zero intervals */
     double min_bps_per_stream;  /**< Minimal rate observed for any stream at the
                                      end of report */
+    uint64_t retransmits; /**< Number of retransmits */
     uint64_t udp_packets;       /**< Number of UDP packets was transmitted */
     uint64_t udp_lost_packets;  /**< Number of UDP packets lost */
     double udp_lost_percent;    /**< UDP packet loss percentage */
