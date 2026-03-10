@@ -683,6 +683,12 @@ tad_eth_sap_pkt_ring_release(tad_eth_sap *sap,
             return;
     }
 
+    if (*ring == NULL)
+    {
+        *ring_hdrlen = 0;
+        return;
+    }
+
     if (munmap(*ring, tp->tp_block_size * tp->tp_block_nr) != 0)
     {
         ERROR("%s(): munmap() failed: %r", __FUNCTION__,
@@ -1327,6 +1333,9 @@ tad_eth_sap_recv_open(tad_eth_sap *sap, unsigned int mode)
 
 #ifdef USE_PF_PACKET
 error_exit:
+#ifdef WITH_PACKET_MMAP_RX_RING
+    tad_eth_sap_pkt_ring_release(sap, TAD_ETH_SAP_PKT_RING_RX);
+#endif /* WITH_PACKET_MMAP_RX_RING */
     if (close(data->in) < 0)
         assert(false);
     data->in = -1;
