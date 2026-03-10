@@ -119,6 +119,7 @@ typedef struct tad_eth_sap_data {
     struct tpacket_req  rx_ring_conf;       /**< Rx ring configuration */
     char               *rx_ring;            /**< Rx ring base address */
     unsigned int        rx_ring_frame_cur;  /**< Next frame to check */
+    unsigned int        rx_ring_hdrlen;     /**< PACKET_HDRLEN for RX socket */
 #endif /* WITH_PACKET_MMAP_RX_RING */
 #else
     pcap_t         *in;         /**< Input handle (for receive) */
@@ -777,6 +778,40 @@ tad_eth_sap_pkt_vlan_tag_valid(uint16_t    tp_vlan_tci,
                      UINT16_MAX + ETHER_CRC_LEN)
 
 static te_errno
+tad_eth_sap_pkt_rx_hdrlen_get(int sock, int version, unsigned int *hdrlen)
+{
+#ifdef PACKET_HDRLEN
+    socklen_t optlen;
+    int val;
+
+    if (hdrlen == NULL)
+        return TE_RC(TE_TAD_PF_PACKET, TE_EINVAL);
+
+    val = version;
+    optlen = sizeof(val);
+    if (getsockopt(sock, SOL_PACKET, PACKET_HDRLEN, &val, &optlen) != 0)
+        return TE_OS_RC(TE_TAD_PF_PACKET, errno);
+
+    if (optlen != sizeof(val) || val <= 0)
+        return TE_RC(TE_TAD_PF_PACKET, TE_EINVAL);
+
+    *hdrlen = val;
+
+    return 0;
+#else
+    UNUSED(sock);
+    UNUSED(version);
+
+    if (hdrlen == NULL)
+        return TE_RC(TE_TAD_PF_PACKET, TE_EINVAL);
+
+    *hdrlen = sizeof(struct tpacket2_hdr);
+
+    return 0;
+#endif
+}
+
+static te_errno
 tad_eth_rx_desc_count_get(const tad_eth_sap_data *sap_data,
                           unsigned int *rx_desc_count)
 {
@@ -806,6 +841,7 @@ tad_eth_sap_pkt_rx_ring_setup(tad_eth_sap *sap)
     tad_eth_sap_data   *data;
     csap_p              csap;
     tad_recv_context   *rx_ctx;
+    unsigned int        sll_off;
     unsigned int        nb_frames_min;
     unsigned int        nb_frames;
     int                 version;
@@ -838,6 +874,10 @@ tad_eth_sap_pkt_rx_ring_setup(tad_eth_sap *sap)
         return rc;
     }
 
+    rc = tad_eth_sap_pkt_rx_hdrlen_get(data->in, version, &data->rx_ring_hdrlen);
+    if (rc != 0)
+        return rc;
+
     rc = tad_eth_rx_desc_count_get(data, &nb_frames_min);
     if (rc != 0)
         nb_frames_min = ETH_SAP_PKT_RX_RING_NB_FRAMES_MIN;
@@ -851,6 +891,19 @@ tad_eth_sap_pkt_rx_ring_setup(tad_eth_sap *sap)
     tp->tp_block_size = tp->tp_frame_nr * tp->tp_frame_size;
     tp->tp_block_nr = 1;
 
+    if (data->rx_ring_hdrlen == 0)
+    {
+        ERROR("%s(): invalid zero PACKET_HDRLEN for RX ring", __func__);
+        return TE_RC(TE_TAD_PF_PACKET, TE_EINVAL);
+    }
+
+    sll_off = TPACKET_ALIGN(data->rx_ring_hdrlen);
+    if (sll_off + sizeof(struct sockaddr_ll) > tp->tp_frame_size)
+    {
+        ERROR("%s(): sockaddr_ll metadata does not fit RX frame: sll_off=%u frame_size=%u",
+              __func__, sll_off, tp->tp_frame_size);
+        return TE_RC(TE_TAD_PF_PACKET, TE_EINVAL);
+    }
     if (setsockopt(data->in, SOL_PACKET, PACKET_RX_RING,
                    (void *)tp, sizeof(*tp)) != 0)
     {
@@ -891,6 +944,8 @@ tad_eth_sap_pkt_rx_ring_release(tad_eth_sap *sap)
 
     if (munmap(data->rx_ring, tp->tp_block_size * tp->tp_block_nr) != 0)
         ERROR("%s(): munmap() failed: %r", TE_OS_RC(TE_TAD_PF_PACKET, errno));
+
+    data->rx_ring_hdrlen = 0;
 }
 
 static te_errno
@@ -903,6 +958,7 @@ tad_eth_sap_pkt_rx_ring_recv(tad_eth_sap        *sap,
     tad_eth_sap_data       *data;
     struct tpacket_req     *tp;
     struct tpacket2_hdr    *ph;
+    unsigned int sll_off;
     bool vlan_tag_valid;
     size_t                  seg_len;
     uint8_t                *seg_data = NULL;
@@ -921,6 +977,8 @@ tad_eth_sap_pkt_rx_ring_recv(tad_eth_sap        *sap,
     tp = &data->rx_ring_conf;
     if (tp->tp_frame_nr == 0)
         return TE_RC(TE_TAD_CSAP, TE_EINVAL);
+
+    sll_off = TPACKET_ALIGN(data->rx_ring_hdrlen);
 
     ph = (struct tpacket2_hdr *)((uint8_t *)data->rx_ring +
                                  (data->rx_ring_frame_cur *
@@ -999,7 +1057,7 @@ tad_eth_sap_pkt_rx_ring_recv(tad_eth_sap        *sap,
     tad_pkt_append_seg(pkt, seg);
     *pkt_len = seg_len;
 
-    memcpy(from, (uint8_t *)ph + TPACKET_ALIGN(sizeof(*ph)), sizeof(*from));
+    memcpy(from, (uint8_t *)ph + sll_off, sizeof(*from));
 
     /* Return the entry to the kernel */
     ph->tp_status = 0;
