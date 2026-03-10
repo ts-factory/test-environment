@@ -3,6 +3,7 @@
 
 sources += files(
     'tad_eth_csap.c',
+    'tad_eth_flood.c',
     'tad_eth_l3.c',
     'tad_eth_layer.c',
     'tad_eth_stack.c',
