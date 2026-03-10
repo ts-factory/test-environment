@@ -115,13 +115,16 @@ if get_variable('opt-tad-cs'.underscorify())
     c_args += [ '-DWITH_CS' ]
 endif
 
-if get_variable('opt-tad-packet_mmap_rx_ring'.underscorify())
+if get_variable('opt-tad-packet_mmap_rx_ring'.underscorify()) or get_variable('opt-tad-packet_mmap_tx_ring'.underscorify())
     if not cc.has_header('poll.h')
         error('Cannot find poll.h header')
     endif
     if not cc.has_header('sys/mman.h')
         error('Cannot find sys/mman.h header')
     endif
+endif
+
+if get_variable('opt-tad-packet_mmap_rx_ring'.underscorify())
     c_args += [ '-DWITH_PACKET_MMAP_RX_RING' ]
 
     min_nb = get_variable('opt-tad-packet_mmap_rx_ring_nb_frames_min'.underscorify())
@@ -129,6 +132,16 @@ if get_variable('opt-tad-packet_mmap_rx_ring'.underscorify())
 
     c_args += ['-DETH_SAP_PKT_RX_RING_NB_FRAMES_MIN=@0@'.format(min_nb)]
     c_args += ['-DETH_SAP_PKT_RX_RING_NB_FRAMES_MAX=@0@'.format(max_nb)]
+endif
+
+if get_variable('opt-tad-packet_mmap_tx_ring'.underscorify())
+    c_args += [ '-DWITH_PACKET_MMAP_TX_RING' ]
+
+    min_nb = get_variable('opt-tad-packet_mmap_tx_ring_nb_frames_min'.underscorify())
+    max_nb = get_variable('opt-tad-packet_mmap_tx_ring_nb_frames_max'.underscorify())
+
+    c_args += ['-DETH_SAP_PKT_TX_RING_NB_FRAMES_MIN=@0@'.format(min_nb)]
+    c_args += ['-DETH_SAP_PKT_TX_RING_NB_FRAMES_MAX=@0@'.format(max_nb)]
 endif
 
 te_libs += [

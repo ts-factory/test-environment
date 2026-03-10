@@ -232,6 +232,16 @@ process_library_tad() {
                 add_meson_lib_opt ${l} ${lrname} \
                     tad-packet_mmap_rx_ring_nb_frames_max \
                     "${p#--packet-mmap-rx-ring-nb-frames-max=}" ;;
+            --with-packet-mmap-tx-ring)
+                add_meson_lib_opt ${l} ${lrname} tad-packet_mmap_tx_ring true ;;
+           --packet-mmap-tx-ring-nb-frames-min=*)
+                add_meson_lib_opt ${l} ${lrname} \
+                    tad-packet_mmap_tx_ring_nb_frames_min \
+                    "${p#--packet-mmap-tx-ring-nb-frames-min=}" ;;
+           --packet-mmap-tx-ring-nb-frames-max=*)
+                add_meson_lib_opt ${l} ${lrname} \
+                    tad-packet_mmap_tx_ring_nb_frames_max \
+                    "${p#--packet-mmap-tx-ring-nb-frames-max=}" ;;
             --with-*)
                 lib_tad_protocols="${lib_tad_protocols} ${p#--with-}" ;;
             --without-static-libc)

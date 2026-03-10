@@ -69,6 +69,12 @@ option('tad-packet_mmap_rx_ring_nb_frames_min', type: 'integer', value: 256,
        description: 'TAD: PACKET_MMAP RX ring min number of frames')
 option('tad-packet_mmap_rx_ring_nb_frames_max', type: 'integer', value: 4096,
        description: 'TAD: PACKET_MMAP RX ring max number of frames')
+option('tad-packet_mmap_tx_ring', type: 'boolean', value: false,
+       description: 'TAD: use packet_mmap_tx_ring to send')
+option('tad-packet_mmap_tx_ring_nb_frames_min', type: 'integer', value: 256,
+       description: 'TAD: PACKET_MMAP TX ring min number of frames')
+option('tad-packet_mmap_tx_ring_nb_frames_max', type: 'integer', value: 4096,
+       description: 'TAD: PACKET_MMAP TX ring max number of frames')
 option('tad-protocols', type: 'string', value: '',
        description: 'TAD protocols to support')
 

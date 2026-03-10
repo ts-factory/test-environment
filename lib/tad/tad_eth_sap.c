@@ -66,16 +66,19 @@
 #endif
 #endif
 
-#if defined(USE_PF_PACKET) && defined(WITH_PACKET_MMAP_RX_RING)
+#if defined(USE_PF_PACKET) && \
+    (defined(WITH_PACKET_MMAP_RX_RING) || defined(WITH_PACKET_MMAP_TX_RING))
 #include <poll.h>
 #include <sys/mman.h>
-#endif /* USE_PF_PACKET && WITH_PACKET_MMAP_RX_RING */
+#endif /* USE_PF_PACKET && WITH_PACKET_MMAP_*_RING */
 
-#if HAVE_LINUX_SOCKIOS_H && defined(WITH_PACKET_MMAP_RX_RING)
+#if HAVE_LINUX_SOCKIOS_H && \
+    (defined(WITH_PACKET_MMAP_RX_RING) || defined(WITH_PACKET_MMAP_TX_RING))
 #include <linux/sockios.h>
 #endif
 
-#if HAVE_LINUX_ETHTOOL_H && defined(WITH_PACKET_MMAP_RX_RING)
+#if HAVE_LINUX_ETHTOOL_H && \
+    (defined(WITH_PACKET_MMAP_RX_RING) || defined(WITH_PACKET_MMAP_TX_RING))
 #include "te_ethtool.h"
 #endif
 
@@ -121,6 +124,13 @@ typedef struct tad_eth_sap_data {
     unsigned int        rx_ring_frame_cur;  /**< Next frame to check */
     unsigned int        rx_ring_hdrlen;     /**< PACKET_HDRLEN for RX socket */
 #endif /* WITH_PACKET_MMAP_RX_RING */
+#ifdef WITH_PACKET_MMAP_TX_RING
+    struct tpacket_req  tx_ring_conf;       /**< Tx ring configuration */
+    char               *tx_ring;            /**< Tx ring base address */
+    unsigned int        tx_ring_frame_cur;  /**< Next frame to use */
+    unsigned int        tx_ring_hdrlen;     /**< PACKET_HDRLEN for TX socket */
+    unsigned int        tx_ring_pending;    /**< Frames queued since last kick */
+#endif /* WITH_PACKET_MMAP_TX_RING */
 #else
     pcap_t         *in;         /**< Input handle (for receive) */
     pcap_t         *out;        /**< Output handle (for send) */
@@ -426,6 +436,7 @@ tad_eth_sap_attach(const char *ifname, tad_eth_sap *sap)
     return 0;
 }
 
+#if defined(WITH_PACKET_MMAP_RX_RING) || defined(WITH_PACKET_MMAP_TX_RING)
 #ifdef WITH_PACKET_MMAP_RX_RING
 #ifndef ETH_SAP_PKT_RX_RING_NB_FRAMES_MIN
 #define ETH_SAP_PKT_RX_RING_NB_FRAMES_MIN   256
@@ -433,12 +444,32 @@ tad_eth_sap_attach(const char *ifname, tad_eth_sap *sap)
 #ifndef ETH_SAP_PKT_RX_RING_NB_FRAMES_MAX
 #define ETH_SAP_PKT_RX_RING_NB_FRAMES_MAX   4096
 #endif
+#endif
+#ifdef WITH_PACKET_MMAP_TX_RING
+#ifndef ETH_SAP_PKT_TX_RING_NB_FRAMES_MIN
+#define ETH_SAP_PKT_TX_RING_NB_FRAMES_MIN   256
+#endif
+#ifndef ETH_SAP_PKT_TX_RING_NB_FRAMES_MAX
+#define ETH_SAP_PKT_TX_RING_NB_FRAMES_MAX   4096
+#endif
+#ifndef ETH_SAP_PKT_TX_RING_MTU_DEFAULT
+#define ETH_SAP_PKT_TX_RING_MTU_DEFAULT     1500
+#endif
+#ifndef ETH_SAP_PKT_TX_RING_KICK_BATCH
+#define ETH_SAP_PKT_TX_RING_KICK_BATCH      64
+#endif
+#define ETH_SAP_PKT_TX_RING_FLUSH_WAIT_MS   1000
+#define ETH_SAP_PKT_TX_RING_FLUSH_MAX_NUM   16
+#define ETH_SAP_PKT_TX_RING_FLUSH_TIMEOUT_MS \
+    (ETH_SAP_PKT_TX_RING_FLUSH_MAX_NUM * ETH_SAP_PKT_TX_RING_FLUSH_WAIT_MS)
+#endif
 #define ETH_SAP_PKT_RING_FRAME_LEN \
     te_round_up_pow2(TPACKET2_HDRLEN + ETHER_HDR_LEN + TAD_VLAN_TAG_LEN + \
                      UINT16_MAX + ETHER_CRC_LEN)
 
 typedef enum tad_eth_sap_pkt_ring_type {
     TAD_ETH_SAP_PKT_RING_RX,
+    TAD_ETH_SAP_PKT_RING_TX,
 } tad_eth_sap_pkt_ring_type;
 
 static inline unsigned int
@@ -517,6 +548,15 @@ tad_eth_desc_count_get(const tad_eth_sap_data *sap_data,
             *desc_count = ethtool_ringparam.rx_max_pending;
             break;
 #endif
+#ifdef WITH_PACKET_MMAP_TX_RING
+        case TAD_ETH_SAP_PKT_RING_TX:
+            ret = ioctl(sap_data->out, SIOCETHTOOL, &ifr);
+            if (ret != 0)
+                return TE_EINVAL;
+
+            *desc_count = ethtool_ringparam.tx_max_pending;
+            break;
+#endif
         default:
             return TE_EINVAL;
     }
@@ -534,6 +574,76 @@ tad_eth_rx_ring_frame_len_get(unsigned int hdrlen)
 }
 #endif
 
+#ifdef WITH_PACKET_MMAP_TX_RING
+static inline bool
+tad_eth_sap_pkt_has_vlan(uint16_t eth_type)
+{
+    if (eth_type == ETH_P_8021Q)
+        return true;
+#ifdef ETH_P_8021AD
+    if (eth_type == ETH_P_8021AD)
+        return true;
+#endif
+
+    return false;
+}
+
+static size_t
+tad_eth_sap_pkt_tx_l3_offset_get(const uint8_t *pkt_data, size_t pkt_len)
+{
+    const size_t l2_addr_len = 2 * ETHER_ADDR_LEN;
+    size_t l3_off = MIN(pkt_len, ETHER_HDR_LEN);
+    size_t eth_type_off = l2_addr_len;
+    uint16_t eth_type;
+
+    if (pkt_data == NULL || pkt_len < ETHER_HDR_LEN)
+        return l3_off;
+
+    while (eth_type_off + sizeof(eth_type) <= pkt_len)
+    {
+        memcpy(&eth_type, pkt_data + eth_type_off, sizeof(eth_type));
+        eth_type = ntohs(eth_type);
+
+        if (!tad_eth_sap_pkt_has_vlan(eth_type))
+            break;
+
+        if (l3_off + TAD_VLAN_TAG_LEN > pkt_len)
+            break;
+
+        l3_off += TAD_VLAN_TAG_LEN;
+        eth_type_off += TAD_VLAN_TAG_LEN;
+    }
+
+    return l3_off;
+}
+
+static unsigned int
+tad_eth_tx_ring_frame_len_get(const tad_eth_sap_data *sap_data,
+                              unsigned int hdrlen)
+{
+    unsigned int mtu = ETH_SAP_PKT_TX_RING_MTU_DEFAULT;
+
+#ifdef SIOCGIFMTU
+    struct ifreq ifr = {};
+    char ifname[IFNAMSIZ];
+
+    if (if_indextoname(sap_data->ifindex, ifname) != NULL)
+    {
+        te_strlcpy(ifr.ifr_name, ifname, IFNAMSIZ);
+        if (ioctl(sap_data->out, SIOCGIFMTU, &ifr) == 0 && ifr.ifr_mtu > 0)
+            mtu = ifr.ifr_mtu;
+    }
+#endif
+
+    /*
+     * TX ring frame does not reserve sockaddr_ll area. For SOCK_RAW packets
+     * destination addressing comes from Ethernet header in frame payload.
+     */
+    return te_round_up_pow2(tad_eth_sap_pkt_ring_data_offset(hdrlen) +
+                            ETHER_HDR_LEN +
+                            TAD_VLAN_TAG_LEN + mtu + ETHER_CRC_LEN);
+}
+#endif
 
 static te_errno
 tad_eth_sap_pkt_ring_setup(tad_eth_sap *sap,
@@ -593,6 +703,21 @@ tad_eth_sap_pkt_ring_setup(tad_eth_sap *sap,
             break;
         }
 #endif
+#ifdef WITH_PACKET_MMAP_TX_RING
+        case TAD_ETH_SAP_PKT_RING_TX:
+            tp = &data->tx_ring_conf;
+            ring = &data->tx_ring;
+            ring_frame_cur = &data->tx_ring_frame_cur;
+            ring_hdrlen = &data->tx_ring_hdrlen;
+            sock = data->out;
+            ring_opt = PACKET_TX_RING;
+            ring_opt_name = "TX";
+
+            nb_frames_min_default = ETH_SAP_PKT_TX_RING_NB_FRAMES_MIN;
+            nb_frames_max = ETH_SAP_PKT_TX_RING_NB_FRAMES_MAX;
+            nb_frames_hint = ETH_SAP_PKT_TX_RING_NB_FRAMES_MIN;
+            break;
+#endif
         default:
             return TE_RC(TE_TAD_PF_PACKET, TE_EINVAL);
     }
@@ -624,11 +749,19 @@ tad_eth_sap_pkt_ring_setup(tad_eth_sap *sap,
     if (ring_type == TAD_ETH_SAP_PKT_RING_RX)
         ring_frame_size = tad_eth_rx_ring_frame_len_get(*ring_hdrlen);
 #endif
+#ifdef WITH_PACKET_MMAP_TX_RING
+    if (ring_type == TAD_ETH_SAP_PKT_RING_TX)
+        ring_frame_size = tad_eth_tx_ring_frame_len_get(data, *ring_hdrlen);
+#endif
 
     tp->tp_frame_nr = nb_frames;
     tp->tp_frame_size = ring_frame_size;
     tp->tp_block_nr = 1;
     tp->tp_block_size = tp->tp_frame_nr * tp->tp_frame_size;
+
+    INFO("PACKET_%s_RING: frame_size=%u block_size=%u block_nr=%u ring_size=%u",
+         ring_opt_name, tp->tp_frame_size, tp->tp_block_size, tp->tp_block_nr,
+         tp->tp_block_size * tp->tp_block_nr);
 
     if (setsockopt(sock, SOL_PACKET, ring_opt,
                    (void *)tp, sizeof(*tp)) != 0)
@@ -651,6 +784,10 @@ tad_eth_sap_pkt_ring_setup(tad_eth_sap *sap,
     }
 
     *ring_frame_cur = 0;
+#ifdef WITH_PACKET_MMAP_TX_RING
+    if (ring_type == TAD_ETH_SAP_PKT_RING_TX)
+        data->tx_ring_pending = 0;
+#endif
 
     return 0;
 }
@@ -696,6 +833,14 @@ tad_eth_sap_pkt_ring_release(tad_eth_sap *sap,
             ring_hdrlen = &data->rx_ring_hdrlen;
             break;
 #endif
+#ifdef WITH_PACKET_MMAP_TX_RING
+        case TAD_ETH_SAP_PKT_RING_TX:
+            tp = &data->tx_ring_conf;
+            ring = &data->tx_ring;
+            ring_frame_cur = &data->tx_ring_frame_cur;
+            ring_hdrlen = &data->tx_ring_hdrlen;
+            break;
+#endif
         default:
             return;
     }
@@ -711,6 +856,10 @@ tad_eth_sap_pkt_ring_release(tad_eth_sap *sap,
     if (*ring == NULL || *ring == MAP_FAILED)
     {
         tad_eth_sap_pkt_ring_state_reset(tp, ring, ring_frame_cur, ring_hdrlen);
+#ifdef WITH_PACKET_MMAP_TX_RING
+        if (ring_type == TAD_ETH_SAP_PKT_RING_TX)
+            data->tx_ring_pending = 0;
+#endif
         return;
     }
     if (munmap(*ring, tp->tp_block_size * tp->tp_block_nr) != 0)
@@ -721,9 +870,331 @@ tad_eth_sap_pkt_ring_release(tad_eth_sap *sap,
 
     /* Reset ring state even if munmap() fails to keep cleanup idempotent. */
     tad_eth_sap_pkt_ring_state_reset(tp, ring, ring_frame_cur, ring_hdrlen);
+#ifdef WITH_PACKET_MMAP_TX_RING
+    if (ring_type == TAD_ETH_SAP_PKT_RING_TX)
+        data->tx_ring_pending = 0;
+#endif
 }
-#endif /* WITH_PACKET_MMAP_RX_RING */
+#endif /* WITH_PACKET_MMAP_RX_RING || WITH_PACKET_MMAP_TX_RING */
 
+#ifdef WITH_PACKET_MMAP_TX_RING
+
+/*
+ * tp_status is shared with the kernel, so the status must be read
+ * after kernel updates to avoid seeing stale frame state.
+ */
+static inline unsigned int
+tad_eth_sap_pkt_status_load(const unsigned int *status)
+{
+    return __atomic_load_n(status, __ATOMIC_ACQUIRE);
+}
+
+/*
+ * tp_status is shared with the kernel, so the status must be updated
+ * after frame updates to publish them before ownership changes.
+ */
+static inline void
+tad_eth_sap_pkt_status_store(unsigned int *status, unsigned int value)
+{
+    __atomic_store_n(status, value, __ATOMIC_RELEASE);
+}
+
+static bool
+tad_eth_sap_pkt_tx_ring_empty(const tad_eth_sap_data *data)
+{
+    const struct tpacket_req *tp = &data->tx_ring_conf;
+    unsigned int i;
+
+    for (i = 0; i < tp->tp_frame_nr; i++)
+    {
+        const struct tpacket2_hdr *ph;
+
+        ph = (const struct tpacket2_hdr *)((const uint8_t *)data->tx_ring +
+                                           (i * tp->tp_frame_size));
+        if (tad_eth_sap_pkt_status_load(&ph->tp_status) != TP_STATUS_AVAILABLE)
+            return false;
+    }
+
+    return true;
+}
+
+static te_errno
+tad_eth_sap_pkt_tx_ring_kick(tad_eth_sap_data *data)
+{
+    te_errno rc;
+    int ret_val;
+
+    ret_val = send(data->out, NULL, 0, MSG_DONTWAIT);
+    if (ret_val >= 0)
+        return 0;
+
+    rc = te_rc_os2te(errno);
+    if (rc == TE_ENOBUFS || rc == TE_EAGAIN)
+        return rc;
+
+    ERROR("%s(): send() failed: %r", __FUNCTION__, rc);
+    return rc;
+}
+
+static te_errno
+tad_eth_sap_pkt_tx_ring_wait_write(int fd, int timeout_ms)
+{
+    struct pollfd pfd;
+    int ret_val;
+
+    pfd.fd = fd;
+    pfd.events = POLLOUT;
+    pfd.revents = 0;
+
+    ret_val = poll(&pfd, 1, timeout_ms);
+    if (ret_val < 0)
+        return TE_OS_RC(TE_TAD_PF_PACKET, errno);
+
+    if (ret_val == 0)
+        return TE_RC(TE_TAD_PF_PACKET, TE_ETIMEDOUT);
+
+    return 0;
+}
+
+static te_errno
+tad_eth_sap_pkt_tx_ring_kick_batched(tad_eth_sap_data *data, bool force)
+{
+    te_errno rc;
+
+    if (!force && data->tx_ring_pending < ETH_SAP_PKT_TX_RING_KICK_BATCH)
+        return 0;
+
+    rc = tad_eth_sap_pkt_tx_ring_kick(data);
+    if (rc == 0)
+    {
+        data->tx_ring_pending = 0;
+        return 0;
+    }
+
+    if (TE_RC_GET_ERROR(rc) == TE_ENOBUFS ||
+        TE_RC_GET_ERROR(rc) == TE_EAGAIN)
+    {
+        return 0;
+    }
+
+    return rc;
+}
+
+static int
+tad_eth_sap_pkt_tx_ring_flush_remaining_ms(const struct timeval *start)
+{
+    struct timeval now;
+    int remaining_ms;
+    int elapsed_us;
+
+    gettimeofday(&now, NULL);
+
+    elapsed_us = TE_SEC2US(now.tv_sec - start->tv_sec) +
+                 now.tv_usec - start->tv_usec;
+    if (elapsed_us < 0)
+        elapsed_us = 0;
+
+    remaining_ms = ETH_SAP_PKT_TX_RING_FLUSH_TIMEOUT_MS - TE_US2MS(elapsed_us);
+    if (remaining_ms <= 0)
+        return 0;
+
+    return (int)remaining_ms;
+}
+
+static te_errno
+tad_eth_sap_pkt_tx_ring_wait_available(tad_eth_sap_data *data,
+                                       struct tpacket2_hdr *ph)
+{
+    struct timeval timeout = TAD_WRITE_TIMEOUT_DEFAULT;
+    int timeout_ms = (int)(TE_SEC2MS(timeout.tv_sec) +
+                           TE_US2MS(timeout.tv_usec));
+    unsigned int retries;
+    unsigned int status;
+    te_errno rc;
+
+    for (retries = 0; retries < TAD_WRITE_RETRIES; retries++)
+    {
+        status = tad_eth_sap_pkt_status_load(&ph->tp_status);
+        if (status == TP_STATUS_AVAILABLE)
+            return 0;
+
+        rc = tad_eth_sap_pkt_tx_ring_kick_batched(data, true);
+        if (rc != 0)
+            return rc;
+
+        /*
+         * Re-read status after kick since the kernel may have already
+         * completed current frame handling.
+         */
+        status = tad_eth_sap_pkt_status_load(&ph->tp_status);
+        if (status == TP_STATUS_AVAILABLE)
+            return 0;
+
+        rc = tad_eth_sap_pkt_tx_ring_wait_write(data->out, timeout_ms);
+        if (TE_RC_GET_ERROR(rc) == TE_ETIMEDOUT)
+            continue;
+        if (rc != 0)
+            return rc;
+    }
+
+    return TE_RC(TE_TAD_PF_PACKET, TE_ENOBUFS);
+}
+
+static te_errno
+tad_eth_sap_pkt_tx_ring_flush(tad_eth_sap *sap)
+{
+    int def_wait_ms = ETH_SAP_PKT_TX_RING_FLUSH_WAIT_MS;
+    tad_eth_sap_data *data = sap->data;
+    struct timeval start;
+    int remaining_ms;
+    te_errno rc = 0;
+
+    gettimeofday(&start, NULL);
+
+    while (true)
+    {
+        if (tad_eth_sap_pkt_tx_ring_empty(data))
+            return 0;
+
+        rc = tad_eth_sap_pkt_tx_ring_kick_batched(data, true);
+        if (rc != 0)
+            return rc;
+
+        if (tad_eth_sap_pkt_tx_ring_empty(data))
+            return 0;
+
+        remaining_ms = tad_eth_sap_pkt_tx_ring_flush_remaining_ms(&start);
+        if (remaining_ms == 0)
+            break;
+
+        rc = tad_eth_sap_pkt_tx_ring_wait_write(
+                 data->out, MIN(remaining_ms, def_wait_ms));
+        if (TE_RC_GET_ERROR(rc) == TE_ETIMEDOUT)
+            continue;
+        if (rc != 0)
+            return rc;
+    }
+
+    if (!tad_eth_sap_pkt_tx_ring_empty(data))
+        return TE_RC(TE_TAD_PF_PACKET, TE_ENOBUFS);
+
+    return 0;
+}
+
+static te_errno
+tad_eth_sap_pkt_tx_ring_send(tad_eth_sap *sap, const tad_pkt *pkt)
+{
+    unsigned int tx_data_off;
+    struct tpacket2_hdr *ph;
+    const uint8_t *pkt_data;
+    tad_eth_sap_data *data;
+    struct tpacket_req *tp;
+    unsigned int frame_cur;
+    size_t max_frame_len;
+    uint8_t *frame_data;
+    unsigned int status;
+    size_t tp_net_off;
+    size_t pkt_len;
+    size_t iovlen;
+    te_errno rc;
+    size_t i;
+
+    data = sap->data;
+    tp = &data->tx_ring_conf;
+
+    tx_data_off = tad_eth_sap_pkt_ring_data_offset((data->tx_ring_hdrlen != 0) ?
+                                                    data->tx_ring_hdrlen :
+                                                    sizeof(*ph));
+    if (tx_data_off >= tp->tp_frame_size)
+        return TE_RC(TE_TAD_PF_PACKET, TE_EINVAL);
+
+    iovlen = tad_pkt_seg_num(pkt);
+
+    {
+        struct iovec iov[iovlen];
+
+        rc = tad_pkt_segs_to_iov(pkt, iov, iovlen);
+        if (rc != 0)
+        {
+            ERROR("Failed to convert segments to I/O vector: %r", rc);
+            return rc;
+        }
+
+        pkt_len = tad_pkt_len(pkt);
+        max_frame_len = tp->tp_frame_size - tx_data_off;
+        if (pkt_len > max_frame_len)
+        {
+            ERROR("%s(): packet is too long for TX ring frame (%u > %u)",
+                  __FUNCTION__, (unsigned)pkt_len, (unsigned)max_frame_len);
+            return TE_RC(TE_TAD_PF_PACKET, TE_E2BIG);
+        }
+
+        frame_cur = data->tx_ring_frame_cur;
+        ph = (struct tpacket2_hdr *)((uint8_t *)data->tx_ring +
+                                     (frame_cur * tp->tp_frame_size));
+
+        status = tad_eth_sap_pkt_status_load(&ph->tp_status);
+        if (status != TP_STATUS_AVAILABLE)
+        {
+            if ((status & TP_STATUS_WRONG_FORMAT) != 0)
+            {
+                ERROR("%s(): TP_STATUS_WRONG_FORMAT in TX ring frame %u",
+                      __FUNCTION__, frame_cur);
+                tad_eth_sap_pkt_status_store(&ph->tp_status,
+                                             TP_STATUS_AVAILABLE);
+            }
+            else
+            {
+                rc = tad_eth_sap_pkt_tx_ring_wait_available(data, ph);
+                if (rc != 0)
+                    return rc;
+            }
+        }
+
+        status = tad_eth_sap_pkt_status_load(&ph->tp_status);
+        if (status != TP_STATUS_AVAILABLE)
+        {
+            ERROR("%s(): failed to get free TX ring frame", __FUNCTION__);
+            return TE_RC(TE_TAD_PF_PACKET, TE_ENOBUFS);
+        }
+
+        memset(ph, 0, tx_data_off);
+        frame_data = (uint8_t *)ph + tx_data_off;
+        for (i = 0; i < iovlen; i++)
+        {
+            memcpy(frame_data, iov[i].iov_base, iov[i].iov_len);
+            frame_data += iov[i].iov_len;
+        }
+    }
+
+    pkt_data = (const uint8_t *)ph + tx_data_off;
+    tp_net_off = tad_eth_sap_pkt_tx_l3_offset_get(pkt_data, pkt_len);
+
+    ph->tp_len = pkt_len;
+    ph->tp_snaplen = pkt_len;
+    ph->tp_mac = tx_data_off;
+    ph->tp_net = tx_data_off + tp_net_off;
+
+    tad_eth_sap_pkt_status_store(&ph->tp_status, TP_STATUS_SEND_REQUEST);
+
+    data->tx_ring_frame_cur = (frame_cur + 1) % tp->tp_frame_nr;
+    data->tx_ring_pending++;
+
+    rc = tad_eth_sap_pkt_tx_ring_kick_batched(data, false);
+    if (rc == 0)
+        return 0;
+
+    if (tad_eth_sap_pkt_status_load(&ph->tp_status) == TP_STATUS_SEND_REQUEST)
+    {
+        tad_eth_sap_pkt_status_store(&ph->tp_status, TP_STATUS_AVAILABLE);
+        data->tx_ring_frame_cur = frame_cur;
+    }
+    if (data->tx_ring_pending > 0)
+        data->tx_ring_pending--;
+
+    return rc;
+}
+#endif /* WITH_PACKET_MMAP_TX_RING */
 
 /* See the description in tad_eth_sap.h */
 te_errno
@@ -793,6 +1264,11 @@ tad_eth_sap_send_open(tad_eth_sap *sap, unsigned int mode)
         ERROR("Failed to bind PF_PACKET socket: %r", rc);
         goto error_exit;
     }
+#ifdef WITH_PACKET_MMAP_TX_RING
+    rc = tad_eth_sap_pkt_ring_setup(sap, TAD_ETH_SAP_PKT_RING_TX);
+    if (rc != 0)
+        goto error_exit;
+#endif /* WITH_PACKET_MMAP_TX_RING */
 #else
     /*
      *  Obtain a packet capture descriptor
@@ -820,6 +1296,9 @@ tad_eth_sap_send_open(tad_eth_sap *sap, unsigned int mode)
     return 0;
 #ifdef USE_PF_PACKET
 error_exit:
+#ifdef WITH_PACKET_MMAP_TX_RING
+    tad_eth_sap_pkt_ring_release(sap, TAD_ETH_SAP_PKT_RING_TX);
+#endif /* WITH_PACKET_MMAP_TX_RING */
     if (close(data->out) < 0)
         assert(false);
     data->out = -1;
@@ -872,6 +1351,10 @@ tad_eth_sap_send(tad_eth_sap *sap, const tad_pkt *pkt)
 #endif
 #endif
 
+#if defined(USE_PF_PACKET) && defined(WITH_PACKET_MMAP_TX_RING)
+    if (data->tx_ring != NULL)
+        return tad_eth_sap_pkt_tx_ring_send(sap, pkt);
+#endif
 #ifndef __CYGWIN__
     F_VERB("%s: writing data to socket: %d", __FUNCTION__, fd);
 #endif
@@ -1016,6 +1499,24 @@ tad_eth_sap_send_close(tad_eth_sap *sap)
 #endif /* !__CYGWIN__ */
 #endif
 
+#if defined(USE_PF_PACKET) && defined(WITH_PACKET_MMAP_TX_RING)
+    if (data->tx_ring != NULL)
+    {
+        te_errno rc = tad_eth_sap_pkt_tx_ring_flush(sap);
+
+        if (rc != 0)
+            WARN("%s(): failed to flush TX ring: %r", __FUNCTION__, rc);
+
+        /*
+         * The PACKET_MMAP API is asynchronous, so update the last packet's
+         * timestamp right after flushing is done.
+         */
+        if (sap->csap != NULL && sap->csap->sender.sent_pkts > 0)
+            gettimeofday(&sap->csap->last_pkt, NULL);
+
+        tad_eth_sap_pkt_ring_release(sap, TAD_ETH_SAP_PKT_RING_TX);
+    }
+#endif
     if (fd >= 0)
     {
         /* check that all data in socket is sent */
@@ -1625,6 +2126,9 @@ tad_eth_sap_detach(tad_eth_sap *sap)
 #ifdef USE_PF_PACKET
 #ifdef WITH_PACKET_MMAP_RX_RING
     tad_eth_sap_pkt_ring_release(sap, TAD_ETH_SAP_PKT_RING_RX);
+#endif
+#ifdef WITH_PACKET_MMAP_TX_RING
+    tad_eth_sap_pkt_ring_release(sap, TAD_ETH_SAP_PKT_RING_TX);
 #endif
     if (data->in != -1)
     {

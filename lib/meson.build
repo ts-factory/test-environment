@@ -144,6 +144,9 @@ lib_opts_tad = [
     'tad-packet_mmap_rx_ring',
     'tad-packet_mmap_rx_ring_nb_frames_min',
     'tad-packet_mmap_rx_ring_nb_frames_max',
+    'tad-packet_mmap_tx_ring',
+    'tad-packet_mmap_tx_ring_nb_frames_min',
+    'tad-packet_mmap_tx_ring_nb_frames_max',
     'tad-protocols',
 ]
 
