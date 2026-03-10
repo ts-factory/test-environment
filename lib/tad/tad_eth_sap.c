@@ -426,6 +426,274 @@ tad_eth_sap_attach(const char *ifname, tad_eth_sap *sap)
     return 0;
 }
 
+#ifdef WITH_PACKET_MMAP_RX_RING
+#ifndef ETH_SAP_PKT_RX_RING_NB_FRAMES_MIN
+#define ETH_SAP_PKT_RX_RING_NB_FRAMES_MIN   256
+#endif
+#ifndef ETH_SAP_PKT_RX_RING_NB_FRAMES_MAX
+#define ETH_SAP_PKT_RX_RING_NB_FRAMES_MAX   4096
+#endif
+#define ETH_SAP_PKT_RING_FRAME_LEN \
+    te_round_up_pow2(TPACKET2_HDRLEN + ETHER_HDR_LEN + TAD_VLAN_TAG_LEN + \
+                     UINT16_MAX + ETHER_CRC_LEN)
+
+typedef enum tad_eth_sap_pkt_ring_type {
+    TAD_ETH_SAP_PKT_RING_RX,
+} tad_eth_sap_pkt_ring_type;
+
+static inline unsigned int
+tad_eth_sap_pkt_ring_data_offset(unsigned int hdrlen)
+{
+    return TPACKET_ALIGN(hdrlen);
+}
+
+static inline unsigned int
+tad_eth_sap_pkt_ring_hdr_space(unsigned int hdrlen)
+{
+    return tad_eth_sap_pkt_ring_data_offset(hdrlen) + sizeof(struct sockaddr_ll);
+}
+
+static te_errno
+tad_eth_sap_pkt_hdrlen_get(int sock, int version, unsigned int *hdrlen)
+{
+#ifdef PACKET_HDRLEN
+    socklen_t optlen;
+    int val;
+
+    if (hdrlen == NULL)
+        return TE_RC(TE_TAD_PF_PACKET, TE_EINVAL);
+
+    val = version;
+    optlen = sizeof(val);
+    if (getsockopt(sock, SOL_PACKET, PACKET_HDRLEN, &val, &optlen) != 0)
+    {
+        te_errno rc = TE_OS_RC(TE_TAD_PF_PACKET, errno);
+
+        ERROR("%s(): getsockopt(PACKET_HDRLEN) failed: %r", __FUNCTION__, rc);
+        return rc;
+    }
+
+    if (optlen != sizeof(val) || val <= 0)
+        return TE_RC(TE_TAD_PF_PACKET, TE_EINVAL);
+
+    *hdrlen = val;
+    return 0;
+#else
+    UNUSED(sock);
+    UNUSED(version);
+
+    if (hdrlen == NULL)
+        return TE_RC(TE_TAD_PF_PACKET, TE_EINVAL);
+
+    *hdrlen = sizeof(struct tpacket2_hdr);
+    return 0;
+#endif
+}
+
+static te_errno
+tad_eth_desc_count_get(const tad_eth_sap_data *sap_data,
+                       tad_eth_sap_pkt_ring_type ring_type,
+                       unsigned int *desc_count)
+{
+    struct ethtool_ringparam ethtool_ringparam = { .cmd = ETHTOOL_GRINGPARAM };
+    char ifname[IFNAMSIZ];
+    struct ifreq ifr = {};
+    int ret;
+
+    if (if_indextoname(sap_data->ifindex, ifname) == NULL)
+        return TE_EINVAL;
+
+    te_strlcpy(ifr.ifr_name, ifname, IFNAMSIZ);
+    ifr.ifr_data = (void *)&ethtool_ringparam;
+
+    switch (ring_type)
+    {
+#ifdef WITH_PACKET_MMAP_RX_RING
+        case TAD_ETH_SAP_PKT_RING_RX:
+            ret = ioctl(sap_data->in, SIOCETHTOOL, &ifr);
+            if (ret != 0)
+                return TE_EINVAL;
+
+            *desc_count = ethtool_ringparam.rx_max_pending;
+            break;
+#endif
+        default:
+            return TE_EINVAL;
+    }
+
+    return 0;
+}
+
+#ifdef WITH_PACKET_MMAP_RX_RING
+static unsigned int
+tad_eth_rx_ring_frame_len_get(unsigned int hdrlen)
+{
+    return te_round_up_pow2(tad_eth_sap_pkt_ring_hdr_space(hdrlen) +
+                            ETHER_HDR_LEN + TAD_VLAN_TAG_LEN +
+                            UINT16_MAX + ETHER_CRC_LEN);
+}
+#endif
+
+
+static te_errno
+tad_eth_sap_pkt_ring_setup(tad_eth_sap *sap,
+                           tad_eth_sap_pkt_ring_type ring_type)
+{
+    unsigned int ring_frame_size;
+    unsigned int nb_frames_min_default;
+    unsigned int *ring_frame_cur;
+    unsigned int *ring_hdrlen;
+    unsigned int nb_frames_min;
+    unsigned int nb_frames_max;
+    unsigned int nb_frames_hint;
+    const char *ring_opt_name;
+    unsigned int nb_frames;
+    tad_eth_sap_data *data;
+    struct tpacket_req *tp;
+    int ring_opt;
+    char **ring;
+    int version;
+    te_errno rc;
+    int sock;
+
+    if (sap == NULL)
+        return TE_RC(TE_TAD_PF_PACKET, TE_EINVAL);
+
+    data = sap->data;
+    if (data == NULL)
+        return TE_RC(TE_TAD_PF_PACKET, TE_EINVAL);
+
+    switch (ring_type)
+    {
+#ifdef WITH_PACKET_MMAP_RX_RING
+        case TAD_ETH_SAP_PKT_RING_RX:
+        {
+            csap_p csap;
+            tad_recv_context *rx_ctx;
+
+            tp = &data->rx_ring_conf;
+            ring = &data->rx_ring;
+            ring_frame_cur = &data->rx_ring_frame_cur;
+            ring_hdrlen = &data->rx_ring_hdrlen;
+            sock = data->in;
+            ring_opt = PACKET_RX_RING;
+            ring_opt_name = "RX";
+
+            csap = sap->csap;
+            if (csap == NULL)
+                return TE_RC(TE_TAD_PF_PACKET, TE_EINVAL);
+
+            rx_ctx = csap_get_recv_context(csap);
+            if (rx_ctx == NULL)
+                return TE_RC(TE_TAD_PF_PACKET, TE_EINVAL);
+
+            nb_frames_min_default = ETH_SAP_PKT_RX_RING_NB_FRAMES_MIN;
+            nb_frames_max = ETH_SAP_PKT_RX_RING_NB_FRAMES_MAX;
+            nb_frames_hint = te_round_up_pow2(rx_ctx->ptrn_data.n_units);
+            break;
+        }
+#endif
+        default:
+            return TE_RC(TE_TAD_PF_PACKET, TE_EINVAL);
+    }
+
+    version = TPACKET_V2;
+    if (setsockopt(sock, SOL_PACKET, PACKET_VERSION, &version,
+                   sizeof(version)) != 0)
+    {
+        rc = TE_OS_RC(TE_TAD_PF_PACKET, errno);
+        ERROR("%s(): setsockopt(PACKET_VERSION) failed: %r",
+              __FUNCTION__, rc);
+        return rc;
+    }
+
+    rc = tad_eth_sap_pkt_hdrlen_get(sock, version, ring_hdrlen);
+    if (rc != 0)
+        return rc;
+
+    rc = tad_eth_desc_count_get(data, ring_type, &nb_frames_min);
+    if (rc != 0)
+        nb_frames_min = nb_frames_min_default;
+
+    nb_frames = MAX(nb_frames_min, nb_frames_hint);
+    nb_frames = MIN(nb_frames, nb_frames_max);
+    INFO("PACKET_%s_RING: nb_frames=%u", ring_opt_name, nb_frames);
+
+    ring_frame_size = ETH_SAP_PKT_RING_FRAME_LEN;
+#ifdef WITH_PACKET_MMAP_RX_RING
+    if (ring_type == TAD_ETH_SAP_PKT_RING_RX)
+        ring_frame_size = tad_eth_rx_ring_frame_len_get(*ring_hdrlen);
+#endif
+
+    tp->tp_frame_nr = nb_frames;
+    tp->tp_frame_size = ring_frame_size;
+    tp->tp_block_nr = 1;
+    tp->tp_block_size = tp->tp_frame_nr * tp->tp_frame_size;
+
+    if (setsockopt(sock, SOL_PACKET, ring_opt,
+                   (void *)tp, sizeof(*tp)) != 0)
+    {
+        rc = TE_OS_RC(TE_TAD_PF_PACKET, errno);
+        ERROR("%s(): setsockopt(PACKET_%s_RING) failed: %r",
+              __FUNCTION__, ring_opt_name, rc);
+        return rc;
+    }
+
+    *ring = mmap(NULL, tp->tp_block_size * tp->tp_block_nr,
+                 PROT_READ | PROT_WRITE, MAP_SHARED | MAP_LOCKED,
+                 sock, 0);
+    if (*ring == NULL)
+    {
+        rc = TE_OS_RC(TE_TAD_PF_PACKET, errno);
+        ERROR("%s(): mmap() failed: %r", __FUNCTION__, rc);
+        return rc;
+    }
+
+    *ring_frame_cur = 0;
+
+    return 0;
+}
+
+static void
+tad_eth_sap_pkt_ring_release(tad_eth_sap *sap,
+                             tad_eth_sap_pkt_ring_type ring_type)
+{
+    unsigned int *ring_hdrlen = NULL;
+    tad_eth_sap_data *data;
+    struct tpacket_req *tp;
+    char **ring;
+
+    if (sap == NULL)
+        return;
+
+    data = sap->data;
+    if (data == NULL)
+        return;
+
+    switch (ring_type)
+    {
+#ifdef WITH_PACKET_MMAP_RX_RING
+        case TAD_ETH_SAP_PKT_RING_RX:
+            tp = &data->rx_ring_conf;
+            ring = &data->rx_ring;
+            ring_hdrlen = &data->rx_ring_hdrlen;
+            break;
+#endif
+        default:
+            return;
+    }
+
+    if (munmap(*ring, tp->tp_block_size * tp->tp_block_nr) != 0)
+    {
+        ERROR("%s(): munmap() failed: %r", __FUNCTION__,
+              TE_OS_RC(TE_TAD_PF_PACKET, errno));
+    }
+
+    *ring_hdrlen = 0;
+}
+#endif /* WITH_PACKET_MMAP_RX_RING */
+
+
 /* See the description in tad_eth_sap.h */
 te_errno
 tad_eth_sap_send_open(tad_eth_sap *sap, unsigned int mode)
@@ -767,187 +1035,6 @@ tad_eth_sap_pkt_vlan_tag_valid(uint16_t    tp_vlan_tci,
 #endif /* USE_PF_PACKET */
 
 #ifdef WITH_PACKET_MMAP_RX_RING
-#ifndef ETH_SAP_PKT_RX_RING_NB_FRAMES_MIN
-#define ETH_SAP_PKT_RX_RING_NB_FRAMES_MIN   256
-#endif
-#ifndef ETH_SAP_PKT_RX_RING_NB_FRAMES_MAX
-#define ETH_SAP_PKT_RX_RING_NB_FRAMES_MAX   4096
-#endif
-#define ETH_SAP_PKT_RX_RING_FRAME_LEN \
-    te_round_up_pow2(TPACKET2_HDRLEN + ETHER_HDR_LEN + TAD_VLAN_TAG_LEN + \
-                     UINT16_MAX + ETHER_CRC_LEN)
-
-static te_errno
-tad_eth_sap_pkt_rx_hdrlen_get(int sock, int version, unsigned int *hdrlen)
-{
-#ifdef PACKET_HDRLEN
-    socklen_t optlen;
-    int val;
-
-    if (hdrlen == NULL)
-        return TE_RC(TE_TAD_PF_PACKET, TE_EINVAL);
-
-    val = version;
-    optlen = sizeof(val);
-    if (getsockopt(sock, SOL_PACKET, PACKET_HDRLEN, &val, &optlen) != 0)
-        return TE_OS_RC(TE_TAD_PF_PACKET, errno);
-
-    if (optlen != sizeof(val) || val <= 0)
-        return TE_RC(TE_TAD_PF_PACKET, TE_EINVAL);
-
-    *hdrlen = val;
-
-    return 0;
-#else
-    UNUSED(sock);
-    UNUSED(version);
-
-    if (hdrlen == NULL)
-        return TE_RC(TE_TAD_PF_PACKET, TE_EINVAL);
-
-    *hdrlen = sizeof(struct tpacket2_hdr);
-
-    return 0;
-#endif
-}
-
-static te_errno
-tad_eth_rx_desc_count_get(const tad_eth_sap_data *sap_data,
-                          unsigned int *rx_desc_count)
-{
-    struct ethtool_ringparam ethtool_ringparam = { .cmd = ETHTOOL_GRINGPARAM };
-    char ifname[IFNAMSIZ];
-    struct ifreq ifr = {};
-    int ret;
-
-    if (if_indextoname(sap_data->ifindex, ifname) == NULL)
-        return TE_EINVAL;
-
-    te_strlcpy(ifr.ifr_name, ifname, IFNAMSIZ);
-    ifr.ifr_data = (void *)&ethtool_ringparam;
-
-    ret = ioctl(sap_data->in, SIOCETHTOOL, &ifr);
-    if (ret != 0)
-        return TE_EINVAL;
-
-    *rx_desc_count = ethtool_ringparam.rx_max_pending;
-
-    return 0;
-}
-
-static te_errno
-tad_eth_sap_pkt_rx_ring_setup(tad_eth_sap *sap)
-{
-    tad_eth_sap_data   *data;
-    csap_p              csap;
-    tad_recv_context   *rx_ctx;
-    unsigned int        sll_off;
-    unsigned int        nb_frames_min;
-    unsigned int        nb_frames;
-    int                 version;
-    struct tpacket_req *tp;
-    te_errno            rc;
-
-    if (sap == NULL)
-        return TE_RC(TE_TAD_PF_PACKET, TE_EINVAL);
-
-    data = sap->data;
-    if (data == NULL)
-        return TE_RC(TE_TAD_PF_PACKET, TE_EINVAL);
-
-    tp = &data->rx_ring_conf;
-
-    csap = sap->csap;
-    if (csap == NULL)
-        return TE_RC(TE_TAD_PF_PACKET, TE_EINVAL);
-
-    rx_ctx = csap_get_recv_context(csap);
-    if (rx_ctx == NULL)
-        return TE_RC(TE_TAD_PF_PACKET, TE_EINVAL);
-
-    version = TPACKET_V2;
-    if (setsockopt(data->in, SOL_PACKET, PACKET_VERSION, &version,
-                   sizeof(version)) != 0)
-    {
-        rc = TE_OS_RC(TE_TAD_PF_PACKET, errno);
-        ERROR("%s(): setsockopt(PACKET_VERSION) failed: %r", rc);
-        return rc;
-    }
-
-    rc = tad_eth_sap_pkt_rx_hdrlen_get(data->in, version, &data->rx_ring_hdrlen);
-    if (rc != 0)
-        return rc;
-
-    rc = tad_eth_rx_desc_count_get(data, &nb_frames_min);
-    if (rc != 0)
-        nb_frames_min = ETH_SAP_PKT_RX_RING_NB_FRAMES_MIN;
-
-    nb_frames = MAX(nb_frames_min, te_round_up_pow2(rx_ctx->ptrn_data.n_units));
-    nb_frames = MIN(nb_frames, ETH_SAP_PKT_RX_RING_NB_FRAMES_MAX);
-    INFO("PACKET_RX_RING: nb_frames=%u", nb_frames);
-
-    tp->tp_frame_nr = nb_frames;
-    tp->tp_frame_size = ETH_SAP_PKT_RX_RING_FRAME_LEN;
-    tp->tp_block_size = tp->tp_frame_nr * tp->tp_frame_size;
-    tp->tp_block_nr = 1;
-
-    if (data->rx_ring_hdrlen == 0)
-    {
-        ERROR("%s(): invalid zero PACKET_HDRLEN for RX ring", __func__);
-        return TE_RC(TE_TAD_PF_PACKET, TE_EINVAL);
-    }
-
-    sll_off = TPACKET_ALIGN(data->rx_ring_hdrlen);
-    if (sll_off + sizeof(struct sockaddr_ll) > tp->tp_frame_size)
-    {
-        ERROR("%s(): sockaddr_ll metadata does not fit RX frame: sll_off=%u frame_size=%u",
-              __func__, sll_off, tp->tp_frame_size);
-        return TE_RC(TE_TAD_PF_PACKET, TE_EINVAL);
-    }
-    if (setsockopt(data->in, SOL_PACKET, PACKET_RX_RING,
-                   (void *)tp, sizeof(*tp)) != 0)
-    {
-        rc = TE_OS_RC(TE_TAD_PF_PACKET, errno);
-        ERROR("%s(): setsockopt(PACKET_RX_RING) failed: %r", rc);
-        return rc;
-    }
-
-    data->rx_ring = mmap(NULL, tp->tp_block_size * tp->tp_block_nr,
-                         PROT_READ | PROT_WRITE, MAP_SHARED | MAP_LOCKED,
-                         data->in, 0);
-    if (data->rx_ring == NULL)
-    {
-        rc = TE_OS_RC(TE_TAD_PF_PACKET, errno);
-        ERROR("%s(): mmap() failed: %r", rc);
-        return rc;
-    }
-
-    data->rx_ring_frame_cur = 0;
-
-    return 0;
-}
-
-static void
-tad_eth_sap_pkt_rx_ring_release(tad_eth_sap *sap)
-{
-    tad_eth_sap_data   *data;
-    struct tpacket_req *tp;
-
-    if (sap == NULL)
-        return;
-
-    data = sap->data;
-    if (data == NULL)
-        return;
-
-    tp = &data->rx_ring_conf;
-
-    if (munmap(data->rx_ring, tp->tp_block_size * tp->tp_block_nr) != 0)
-        ERROR("%s(): munmap() failed: %r", TE_OS_RC(TE_TAD_PF_PACKET, errno));
-
-    data->rx_ring_hdrlen = 0;
-}
-
 static te_errno
 tad_eth_sap_pkt_rx_ring_recv(tad_eth_sap        *sap,
                              unsigned int        timeout,
@@ -1209,7 +1296,7 @@ tad_eth_sap_recv_open(tad_eth_sap *sap, unsigned int mode)
     }
 
 #ifdef WITH_PACKET_MMAP_RX_RING
-    rc = tad_eth_sap_pkt_rx_ring_setup(sap);
+    rc = tad_eth_sap_pkt_ring_setup(sap, TAD_ETH_SAP_PKT_RING_RX);
     if (rc != 0)
         goto error_exit;
 #endif /* WITH_PACKET_MMAP_RX_RING */
@@ -1477,7 +1564,7 @@ tad_eth_sap_recv_close(tad_eth_sap *sap)
     assert(data != NULL);
 #ifdef USE_PF_PACKET
 #ifdef WITH_PACKET_MMAP_RX_RING
-    tad_eth_sap_pkt_rx_ring_release(sap);
+    tad_eth_sap_pkt_ring_release(sap, TAD_ETH_SAP_PKT_RING_RX);
 #endif /* WITH_PACKET_MMAP_RX_RING */
     return close_socket(&data->in);
 #else
