@@ -656,13 +656,28 @@ tad_eth_sap_pkt_ring_setup(tad_eth_sap *sap,
 }
 
 static void
+tad_eth_sap_pkt_ring_state_reset(struct tpacket_req *tp, char **ring,
+                                 unsigned int *ring_frame_cur,
+                                 unsigned int *ring_hdrlen)
+{
+    if (ring != NULL)
+        *ring = NULL;
+    if (tp != NULL)
+        memset(tp, 0, sizeof(*tp));
+    if (ring_frame_cur != NULL)
+        *ring_frame_cur = 0;
+    if (ring_hdrlen != NULL)
+        *ring_hdrlen = 0;
+}
+static void
 tad_eth_sap_pkt_ring_release(tad_eth_sap *sap,
                              tad_eth_sap_pkt_ring_type ring_type)
 {
+    unsigned int *ring_frame_cur = NULL;
     unsigned int *ring_hdrlen = NULL;
+    struct tpacket_req *tp = NULL;
     tad_eth_sap_data *data;
-    struct tpacket_req *tp;
-    char **ring;
+    char **ring = NULL;
 
     if (sap == NULL)
         return;
@@ -677,6 +692,7 @@ tad_eth_sap_pkt_ring_release(tad_eth_sap *sap,
         case TAD_ETH_SAP_PKT_RING_RX:
             tp = &data->rx_ring_conf;
             ring = &data->rx_ring;
+            ring_frame_cur = &data->rx_ring_frame_cur;
             ring_hdrlen = &data->rx_ring_hdrlen;
             break;
 #endif
@@ -684,19 +700,27 @@ tad_eth_sap_pkt_ring_release(tad_eth_sap *sap,
             return;
     }
 
-    if (*ring == NULL)
+    if (tp == NULL || ring == NULL || ring_frame_cur == NULL ||
+        ring_hdrlen == NULL)
     {
-        *ring_hdrlen = 0;
+        ERROR("%s(): incomplete PACKET_MMAP ring state for ring type %d",
+              __FUNCTION__, ring_type);
         return;
     }
 
+    if (*ring == NULL || *ring == MAP_FAILED)
+    {
+        tad_eth_sap_pkt_ring_state_reset(tp, ring, ring_frame_cur, ring_hdrlen);
+        return;
+    }
     if (munmap(*ring, tp->tp_block_size * tp->tp_block_nr) != 0)
     {
         ERROR("%s(): munmap() failed: %r", __FUNCTION__,
               TE_OS_RC(TE_TAD_PF_PACKET, errno));
     }
 
-    *ring_hdrlen = 0;
+    /* Reset ring state even if munmap() fails to keep cleanup idempotent. */
+    tad_eth_sap_pkt_ring_state_reset(tp, ring, ring_frame_cur, ring_hdrlen);
 }
 #endif /* WITH_PACKET_MMAP_RX_RING */
 
@@ -1596,10 +1620,12 @@ tad_eth_sap_detach(tad_eth_sap *sap)
 
     assert(sap != NULL);
     data = sap->data;
-    sap->data = NULL;
     assert(data != NULL);
 
 #ifdef USE_PF_PACKET
+#ifdef WITH_PACKET_MMAP_RX_RING
+    tad_eth_sap_pkt_ring_release(sap, TAD_ETH_SAP_PKT_RING_RX);
+#endif
     if (data->in != -1)
     {
         WARN("Force close of input PF_PACKET socket on detach");
@@ -1625,6 +1651,7 @@ tad_eth_sap_detach(tad_eth_sap *sap)
     }
 #endif
 
+    sap->data = NULL;
     free(data);
 
     return result;
