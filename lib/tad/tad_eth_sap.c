@@ -960,12 +960,15 @@ tad_eth_sap_pkt_rx_ring_recv(tad_eth_sap        *sap,
     struct tpacket2_hdr    *ph;
     unsigned int sll_off;
     bool vlan_tag_valid;
-    size_t                  seg_len;
-    uint8_t                *seg_data = NULL;
-    size_t                  copy_len;
-    size_t                  remaining_len;
-    size_t                  data_off;
-    tad_pkt_seg            *seg;
+    const size_t l2_addr_len = 2 * ETHER_ADDR_LEN;
+    const uint8_t *frame_data;
+    uint8_t *seg_data = NULL;
+    size_t frame_avail_len;
+    size_t frame_len;
+    tad_pkt_seg *seg;
+    bool insert_vlan;
+    te_errno rc = 0;
+    size_t seg_len;
 
     if ((sap == NULL) || (pkt == NULL) || (pkt_len == NULL) || (from == NULL))
         return TE_RC(TE_TAD_CSAP, TE_EINVAL);
@@ -1017,21 +1020,52 @@ tad_eth_sap_pkt_rx_ring_recv(tad_eth_sap        *sap,
     vlan_tag_valid = tad_eth_sap_pkt_vlan_tag_valid(ph->tp_vlan_tci,
                                                     ph->tp_status);
 
-    seg_len = (vlan_tag_valid) ? ph->tp_len + TAD_VLAN_TAG_LEN : ph->tp_len;
+    frame_len = ph->tp_snaplen;
+    if (frame_len == 0)
+    {
+        rc = TE_RC(TE_TAD_CSAP, TE_EIO);
+        WARN("%s(): got empty frame in RX ring", __func__);
+        goto release_entry;
+    }
+
+    if (ph->tp_mac >= tp->tp_frame_size)
+    {
+        rc = TE_RC(TE_TAD_CSAP, TE_EINVAL);
+        WARN("%s(): invalid tp_mac (%u) for frame_size (%u)",
+             __func__, ph->tp_mac, tp->tp_frame_size);
+        goto release_entry;
+    }
+
+    frame_avail_len = tp->tp_frame_size - ph->tp_mac;
+    if (frame_len > frame_avail_len)
+    {
+        rc = TE_RC(TE_TAD_CSAP, TE_EINVAL);
+        WARN("%s(): tp_snaplen (%u) exceeds frame tail (%u)",
+             __func__, ph->tp_snaplen, (unsigned int)frame_avail_len);
+        goto release_entry;
+    }
+
+    if (ph->tp_snaplen > ph->tp_len)
+    {
+        rc = TE_RC(TE_TAD_CSAP, TE_EINVAL);
+        WARN("%s(): invalid tpacket2_hdr lengths: tp_snaplen (%u) > tp_len (%u)",
+             __func__, ph->tp_snaplen, ph->tp_len);
+        goto release_entry;
+    }
+
+    frame_data = (const uint8_t *)ph + ph->tp_mac;
+    insert_vlan = vlan_tag_valid && frame_len >= l2_addr_len;
+    seg_len = frame_len;
+    if (insert_vlan)
+        seg_len += TAD_VLAN_TAG_LEN;
+
     seg_data = TE_ALLOC(seg_len);
-
-    remaining_len = seg_len;
-
-    copy_len = MIN(remaining_len, 2 * ETHER_ADDR_LEN);
-    memcpy(seg_data, (uint8_t *)ph + ph->tp_mac, copy_len);
-    data_off = copy_len;
-    remaining_len -= copy_len;
-
-    if (vlan_tag_valid && remaining_len >= TAD_VLAN_TAG_LEN)
+    if (insert_vlan)
     {
         struct tad_vlan_tag *tag;
 
-        tag = (struct tad_vlan_tag *)(seg_data + data_off);
+        memcpy(seg_data, frame_data, l2_addr_len);
+        tag = (struct tad_vlan_tag *)(seg_data + l2_addr_len);
 
 #ifdef TP_STATUS_VLAN_TPID_VALID
         tag->vlan_tpid = htons((ph->tp_status & TP_STATUS_VLAN_TPID_VALID) ?
@@ -1041,12 +1075,13 @@ tad_eth_sap_pkt_rx_ring_recv(tad_eth_sap        *sap,
 #endif
         tag->vlan_tci = htons(ph->tp_vlan_tci);
 
-        data_off += TAD_VLAN_TAG_LEN;
-        remaining_len -= TAD_VLAN_TAG_LEN;
+        memcpy(seg_data + l2_addr_len + TAD_VLAN_TAG_LEN,
+               frame_data + l2_addr_len, frame_len - l2_addr_len);
     }
-
-    memcpy(seg_data + data_off, (uint8_t *)ph + ph->tp_mac + (2 * ETHER_ADDR_LEN),
-           remaining_len);
+    else
+    {
+        memcpy(seg_data, frame_data, frame_len);
+    }
 
     /*
      * It is not guaranteed that the TAD packet consists of exactly one
@@ -1059,6 +1094,7 @@ tad_eth_sap_pkt_rx_ring_recv(tad_eth_sap        *sap,
 
     memcpy(from, (uint8_t *)ph + sll_off, sizeof(*from));
 
+release_entry:
     /* Return the entry to the kernel */
     ph->tp_status = 0;
     __sync_synchronize();
@@ -1066,7 +1102,7 @@ tad_eth_sap_pkt_rx_ring_recv(tad_eth_sap        *sap,
     /* Update the ring offset to point to the next entry */
     data->rx_ring_frame_cur = (data->rx_ring_frame_cur + 1) % tp->tp_frame_nr;
 
-    return 0;
+    return rc;
 }
 #endif /* WITH_PACKET_MMAP_RX_RING */
 
