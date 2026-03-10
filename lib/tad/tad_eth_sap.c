@@ -642,9 +642,10 @@ tad_eth_sap_pkt_ring_setup(tad_eth_sap *sap,
     *ring = mmap(NULL, tp->tp_block_size * tp->tp_block_nr,
                  PROT_READ | PROT_WRITE, MAP_SHARED | MAP_LOCKED,
                  sock, 0);
-    if (*ring == NULL)
+    if (*ring == MAP_FAILED)
     {
         rc = TE_OS_RC(TE_TAD_PF_PACKET, errno);
+        *ring = NULL;
         ERROR("%s(): mmap() failed: %r", __FUNCTION__, rc);
         return rc;
     }
