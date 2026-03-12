@@ -40,12 +40,10 @@
  * Method to iterate huge number of TCP PUSH messages, using
  * one correctly generated frame with such message.
  *
- * Prototype complies to function type tad_special_send_pkt_cb .
- *
  * User param should be string of format
  * "<quantity of pkts>:<wanted throughput in byte per second>"
  */
-
+tad_special_send_pkt_cb tad_tcpip_flood;
 te_errno
 tad_tcpip_flood(csap_p csap, const char  *usr_param, tad_pkts *pkts)
 {

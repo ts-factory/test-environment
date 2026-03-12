@@ -139,8 +139,7 @@ extern te_errno tad_send_prepare_bin(csap_p csap, asn_value *nds,
 
 
 /**
- * Type for reference to user function for some magic processing
- * with matched pkt
+ * Function type of user-defined packet send callback ("send-func").
  *
  * @param csap          CSAP descriptor structure.
  * @param usr_param     String passed by user.
@@ -148,9 +147,9 @@ extern te_errno tad_send_prepare_bin(csap_p csap, asn_value *nds,
  *
  * @return Status code.
  */
-typedef te_errno (*tad_special_send_pkt_cb)(csap_p csap,
-                                            const char  *usr_param,
-                                            tad_pkts *pkts);
+typedef te_errno tad_special_send_pkt_cb(csap_p csap,
+                                         const char  *usr_param,
+                                         tad_pkts *pkts);
 
 
 #ifdef __cplusplus

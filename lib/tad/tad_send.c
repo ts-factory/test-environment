@@ -710,7 +710,7 @@ tad_send_by_template_unit(csap_p csap, tad_send_tmpl_unit_data *tu_data)
     unsigned int    i;
 
 #if 1 /* FIXME: More part of this processing to prepare stage */
-    tad_special_send_pkt_cb  send_cb = NULL;
+    tad_special_send_pkt_cb *send_cb = NULL;
     char                    *send_cb_name = NULL;
     char                    *send_cb_userdata = NULL;
 #endif
