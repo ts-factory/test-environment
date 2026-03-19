@@ -293,6 +293,40 @@ tapi_tad_tmpl_ptrn_set_payload_plain(asn_value  **obj_spec,
     return TE_RC(TE_TAPI, rc);
 }
 
+/* See the description in tapi_ndn.h */
+te_errno
+tapi_tad_ptrn_set_payload_mask(asn_value **ptrn, const void *value,
+                               const void *mask, size_t length, bool exact_len)
+{
+    asn_value *unit_spec;
+    te_errno rc;
+
+    if (value == NULL || mask == NULL)
+        return TE_RC(TE_TAPI, TE_EINVAL);
+
+    rc = tapi_tad_tmpl_ptrn_get_unit(ptrn, true, &unit_spec);
+    if (rc != 0)
+        return rc;
+
+    rc = asn_write_value_field(unit_spec, value, length, "payload.#mask.v");
+    if (rc != 0)
+        goto fail;
+
+    rc = asn_write_value_field(unit_spec, mask, length, "payload.#mask.m");
+    if (rc != 0)
+        goto fail;
+
+    rc = asn_write_bool(unit_spec, exact_len, "payload.#mask.exact-len");
+    if (rc != 0)
+        goto fail;
+
+    return 0;
+
+fail:
+    ERROR("Failed to set payload mask: %r", rc);
+    return TE_RC(TE_TAPI, rc);
+}
+
 /* See the description in 'tapi_ndn.h' */
 te_errno
 tapi_pdus_free_fields_by_du_tag(asn_value      *pdus,

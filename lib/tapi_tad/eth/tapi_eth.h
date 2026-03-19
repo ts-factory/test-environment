@@ -24,6 +24,20 @@
 #include "tapi_tad.h"
 #include "tapi_ndn.h"
 
+/** EtherType of IEEE 802.3 MAC Control frames. */
+#ifdef ETH_P_PAUSE
+#define TAPI_ETH_MAC_CTRL_ETHER_TYPE ETH_P_PAUSE
+#else
+#define TAPI_ETH_MAC_CTRL_ETHER_TYPE UINT16_C(0x8808)
+#endif
+
+/** Reserved destination MAC address of IEEE 802.3 MAC Control frames. */
+#define TAPI_ETH_MAC_CTRL_DST_ADDR \
+    { 0x01, 0x80, 0xc2, 0x00, 0x00, 0x01 }
+
+/** IEEE 802.3x Pause opcode. */
+#define TAPI_ETH_MAC_CTRL_OPCODE_PAUSE UINT16_C(0x0001)
+
 
 /**
  * Add Ethernet layer in CSAP specification.
@@ -97,6 +111,63 @@ extern te_errno tapi_eth_add_pdu(asn_value      **tmpl_or_ptrn,
                                  const uint16_t  *ether_type,
                                  te_bool3         tagged,
                                  te_bool3         llc);
+
+/**
+ * Add IEEE 802.3 MAC Control frame as the last PDU to the last unit
+ * of the traffic template or pattern.
+ *
+ * @param tmpl_or_ptrn  Location of ASN.1 value with traffic template or
+ *                      pattern
+ * @param pdu           Location for ASN.1 value pointer with added PDU
+ * @param is_pattern    Is the first argument template or pattern
+ * @param dst_addr      Pointer to destination address or @c NULL.
+ * @param src_addr      Pointer to source address or @c NULL.
+ * @param tagged        Whether frames should be VLAN tagged, any or
+ *                      untagged.
+ * @param payload       Pointer to payload bytes or @c NULL.
+ * @param payload_len   Payload length.
+ *
+ * @note If @a payload is @c NULL and @a length is not @c 0, random
+ *       payload contents is generated on sending and any payload of
+ *       specified length is matched.
+ *
+ * @return Status code.
+ */
+extern te_errno tapi_eth_add_mac_ctrl_pdu(asn_value **tmpl_or_ptrn,
+                                          asn_value **pdu, bool is_pattern,
+                                          const uint8_t *dst_addr,
+                                          const uint8_t *src_addr,
+                                          te_bool3 tagged, const void *payload,
+                                          size_t payload_len);
+
+/**
+ * Add IEEE 802.3x Pause frame as the last PDU to the last unit of
+ * the traffic template or pattern.
+ *
+ * @param tmpl_or_ptrn  Location of ASN.1 value with traffic template or
+ *                      pattern.
+ * @param pdu           Location for ASN.1 value pointer with added PDU.
+ * @param is_pattern    Is the first argument template or pattern.
+ * @param dst_addr      Pointer to destination address or @c NULL.
+ *                      If @c NULL, the reserved MAC Control destination
+ *                      address is used.
+ * @param src_addr      Pointer to source address or @c NULL.
+ * @param pause_time    Pause time or @c NULL. For pattern this means "any
+ *                      pause time"; for template it is invalid.
+ * @param tagged        Whether frames should be VLAN tagged, any or
+ *                      untagged.
+ *
+ * @note If @a is_pattern is @c true, only the Pause header prefix is
+ *       matched so that Ethernet padding does not affect receive matching.
+ *
+ * @return Status code.
+ */
+extern te_errno tapi_eth_add_pause_pdu(asn_value **tmpl_or_ptrn,
+                                       asn_value **pdu, bool is_pattern,
+                                       const uint8_t *dst_addr,
+                                       const uint8_t *src_addr,
+                                       const uint16_t *pause_time,
+                                       te_bool3 tagged);
 
 /**
  * Add exact specification of the Length/Type field of the IEEE 802.3

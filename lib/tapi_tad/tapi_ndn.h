@@ -182,6 +182,26 @@ extern te_errno tapi_tad_tmpl_ptrn_set_payload_plain(
                     size_t       length);
 
 /**
+ * Set payload mask of the last unit in the traffic pattern
+ * specification.
+ *
+ * @param ptrn          Location of ASN.1 value with Pattern.
+ *                      specification (if NULL pointer is stored in
+ *                      location, a new one is initialized).
+ * @param value         Pointer to payload bytes.
+ * @param mask          Pointer to payload mask bytes.
+ * @param length        Payload length.
+ * @param exact_len     Whether payload length should match exactly.
+ *
+ * @return Status code.
+ */
+extern te_errno tapi_tad_ptrn_set_payload_mask(asn_value **ptrn,
+                                               const void *value,
+                                               const void *mask,
+                                               size_t length,
+                                               bool exact_len);
+
+/**
  * Free all the PDU fields of a choice denoted by a given DU tag
  * (eg. NDN_DU_SCRIPT) from all the PDUs in a given PDU sequence
  *

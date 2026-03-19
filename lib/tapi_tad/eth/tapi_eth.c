@@ -44,6 +44,13 @@ struct tapi_eth_packet_storage {
     te_errno        err;
 };
 
+static void
+tapi_eth_write_u16_be(uint8_t *buf, uint16_t value)
+{
+    buf[0] = (value >> 8) & 0xff;
+    buf[1] = value & 0xff;
+}
+
 /* See the description in tapi_eth.h */
 te_errno
 tapi_eth_add_csap_layer(asn_value      **csap_spec,
@@ -188,6 +195,70 @@ tapi_eth_add_pdu(asn_value      **tmpl_or_ptrn,
 
     if (pdu != NULL)
         *pdu = tmp_pdu;
+
+    return 0;
+}
+
+/* See the description in tapi_eth.h */
+te_errno
+tapi_eth_add_mac_ctrl_pdu(asn_value **tmpl_or_ptrn, asn_value **pdu,
+                          bool is_pattern, const uint8_t *dst_addr,
+                          const uint8_t *src_addr, te_bool3 tagged,
+                          const void *payload, size_t payload_len)
+{
+    uint16_t ether_type = TAPI_ETH_MAC_CTRL_ETHER_TYPE;
+
+    CHECK_RC(tapi_eth_add_pdu(tmpl_or_ptrn, pdu, is_pattern, dst_addr,
+                              src_addr, &ether_type, tagged,
+                              TE_BOOL3_FALSE));
+
+    if (payload != NULL || payload_len != 0)
+    {
+        CHECK_RC(tapi_tad_tmpl_ptrn_set_payload_plain(tmpl_or_ptrn,
+                                                      is_pattern,
+                                                      payload,
+                                                      payload_len));
+    }
+
+    return 0;
+}
+
+/* See the description in tapi_eth.h */
+te_errno
+tapi_eth_add_pause_pdu(asn_value **tmpl_or_ptrn, asn_value **pdu,
+                       bool is_pattern, const uint8_t *dst_addr,
+                       const uint8_t *src_addr, const uint16_t *pause_time,
+                       te_bool3 tagged)
+{
+    static const uint8_t mac_ctrl_dst[ETHER_ADDR_LEN] =
+        TAPI_ETH_MAC_CTRL_DST_ADDR;
+    const uint8_t *pause_dst = (dst_addr == NULL) ? mac_ctrl_dst : dst_addr;
+    uint8_t payload[4] = { 0 };
+    uint8_t mask[sizeof(payload)] = { 0xff, 0xff, 0x00, 0x00 };
+
+    if (!is_pattern && pause_time == NULL)
+        return TE_RC(TE_TAPI, TE_EINVAL);
+
+    tapi_eth_write_u16_be(payload, TAPI_ETH_MAC_CTRL_OPCODE_PAUSE);
+
+    if (pause_time != NULL)
+    {
+        tapi_eth_write_u16_be(payload + 2, *pause_time);
+        mask[2] = 0xff;
+        mask[3] = 0xff;
+    }
+
+    CHECK_RC(tapi_eth_add_mac_ctrl_pdu(tmpl_or_ptrn, pdu, is_pattern,
+                                       pause_dst, src_addr, tagged,
+                                       is_pattern ? NULL : payload,
+                                       is_pattern ? 0 : sizeof(payload)));
+
+    if (is_pattern)
+    {
+        /* Match the Pause prefix without depending on Ethernet padding. */
+        CHECK_RC(tapi_tad_ptrn_set_payload_mask(tmpl_or_ptrn, payload, mask,
+                                                sizeof(payload), false));
+    }
 
     return 0;
 }
