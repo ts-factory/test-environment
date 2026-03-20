@@ -693,7 +693,7 @@ tapi_cfg_phy_mode_adv_set(const char *ta,
     int value = state ? 1 : 0;
 
     return cfg_set_instance_local_fmt(
-                                CVT_INTEGER, &value,
+                                CFG_VAL(INTEGER, value),
                                 "/agent:%s/interface:%s/phy:/mode:%s",
                                 ta, if_name, mode_name);
 }
