@@ -924,9 +924,6 @@ tapi_flow_gen_base_ptrn(asn_value *rcv_ptrn, asn_value **base_ptrn_p)
 
     RING("%s() started", __FUNCTION__);
 
-    if (buf == NULL)
-        return TE_RC(TE_TAPI, TE_ENOMEM);
-
     if ((rc = asn_parse_value_text("{ { pdus {} } }",
                                    ndn_traffic_pattern,
                                    &base_ptrn, &num)) != 0)
