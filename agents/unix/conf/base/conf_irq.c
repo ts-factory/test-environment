@@ -286,6 +286,7 @@ ta_irq_fill_objs(unsigned int gid, const char *if_name)
     te_string obj_name = TE_STRING_INIT_STATIC(CFG_OID_MAX);
     ta_cfg_obj_t *obj;
     te_vec *result_irqs = NULL;
+    te_vec remove_irqs = TE_VEC_INIT(unsigned int);
     char line[1024];
     te_vec  cpus;
     struct ta_irq_obj *irq_obj;
@@ -295,6 +296,7 @@ ta_irq_fill_objs(unsigned int gid, const char *if_name)
     te_errno rc = 0;
     int  rest_len;
     unsigned long val;
+    unsigned int *rem_irq;
 
     cpus = TE_VEC_INIT(struct ta_irq_per_cpu);
 
@@ -356,6 +358,7 @@ ta_irq_fill_objs(unsigned int gid, const char *if_name)
         char *current;
         unsigned int irq_val;
         struct ta_irq_per_cpu *irq_per_cpu;
+        bool removed_irq = false;
 
         while (true)
         {
@@ -365,16 +368,10 @@ ta_irq_fill_objs(unsigned int gid, const char *if_name)
                 {
                     INFO("Failed to find IRQ:%u in /proc/interrupts.",
                          irq_obj->irq_num);
-                    rc = del_irq_obj(result_irqs, irq_obj->irq_num);
-                    if (rc == 0)
-                    {
-                        rewind(f);
-                        continue;
-                    }
-                    else
-                    {
-                        goto cleanup;
-                    }
+                    TE_VEC_APPEND(&remove_irqs, irq_obj->irq_num);
+                    rewind(f);
+                    removed_irq = true;
+                    break;
                 }
                 else
                 {
@@ -387,6 +384,8 @@ ta_irq_fill_objs(unsigned int gid, const char *if_name)
             if (irq_val == irq_obj->irq_num)
                 break;
         }
+        if (removed_irq)
+            continue;
         current = strchr(line, ':') + 1;
 
         TE_VEC_FOREACH(&cpus, irq_per_cpu)
@@ -408,6 +407,12 @@ ta_irq_fill_objs(unsigned int gid, const char *if_name)
         if (rc != 0)
             goto cleanup;
     }
+    TE_VEC_FOREACH(&remove_irqs, rem_irq)
+    {
+        rc = del_irq_obj(result_irqs, *rem_irq);
+        if (rc != 0)
+            goto cleanup;
+    }
 
     rc = ta_obj_add(TA_OBJ_TYPE_IF_IRQ,
                     te_string_value(&obj_name),
@@ -419,6 +424,7 @@ cleanup:
     if (f != NULL)
         fclose(f);
     te_vec_free(&cpus);
+    te_vec_free(&remove_irqs);
     te_string_free(&obj_name);
 
     return rc;
