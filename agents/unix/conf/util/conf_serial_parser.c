@@ -494,6 +494,7 @@ parser_common_get(unsigned int gid, const char *oid, char *value,
 {
     UNUSED(gid);
 
+    const char *log_level_str;
     serial_parser_t *parser;
 
     parser = parser_get_by_name(pname);
@@ -518,7 +519,11 @@ parser_common_get(unsigned int gid, const char *oid, char *value,
     else if (strstr(oid, "/logging:") != NULL)
     {
         if (strstr(oid, "/level:") != NULL)
-            snprintf(value, RCF_MAX_VAL, "%d", parser->level);
+        {
+            log_level_str = te_log_level2str(parser->level);
+            snprintf(value, RCF_MAX_VAL, "%s",
+                     log_level_str != NULL ? log_level_str : TE_LL_WARN_STR);
+        }
         else if (strstr(oid, "/user:") != NULL)
             snprintf(value, RCF_MAX_VAL, "%s", parser->log_user);
         else
