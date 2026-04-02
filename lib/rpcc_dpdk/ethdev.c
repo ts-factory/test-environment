@@ -2813,6 +2813,7 @@ rpc_dpdk_eth_await_link_up(rcf_rpc_server *rpcs,
 {
     tarpc_dpdk_eth_await_link_up_in  in;
     tarpc_dpdk_eth_await_link_up_out out;
+    uint64_t timeout_ms;
 
     memset(&in, 0, sizeof(in));
     memset(&out, 0, sizeof(out));
@@ -2823,10 +2824,12 @@ rpc_dpdk_eth_await_link_up(rcf_rpc_server *rpcs,
     in.after_up_ms = after_up_ms;
 
     /*
-     * Wait an extra second to make sure the other side has enough time
-     * to respond.
+     * In the worst case every attempt may include both waits. Add an
+     * extra second to make sure the other side has enough time to respond.
      */
-    rpcs->timeout = wait_int_ms * nb_attempts + after_up_ms + 1000;
+    timeout_ms = ((uint64_t)wait_int_ms + after_up_ms) * nb_attempts + 1000;
+    rpcs->timeout = (timeout_ms > UINT32_MAX) ?
+                    UINT32_MAX : (uint32_t)timeout_ms;
 
     rcf_rpc_call(rpcs, "dpdk_eth_await_link_up", &in, &out);
     CHECK_RETVAL_VAR_IS_ZERO_OR_NEG_ERRNO(dpdk_eth_await_link_up, out.retval);

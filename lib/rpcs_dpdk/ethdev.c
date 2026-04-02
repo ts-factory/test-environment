@@ -1800,10 +1800,21 @@ TARPC_FUNC_STANDALONE(dpdk_eth_await_link_up, {},
 
         if (eth_link.link_status)
         {
+            if (in->after_up_ms != 0)
+            {
+                usleep(in->after_up_ms * 1000);
+
+                memset(&eth_link, 0, sizeof(eth_link));
+                MAKE_CALL(out->retval = rte_eth_link_get_nowait(in->port_id,
+                                                                &eth_link));
+                if (out->retval != 0)
+                    break;
+
+                if (!eth_link.link_status)
+                    continue;
+            }
+
             out->retval = 0;
-
-            usleep(in->after_up_ms * 1000);
-
             goto done;
         }
     }
