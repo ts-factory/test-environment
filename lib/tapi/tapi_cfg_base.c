@@ -1500,6 +1500,42 @@ tapi_cfg_base_if_disable_rx_hwtstamp(const char *agent, const char *interface)
     return 0;
 }
 
+/* Check whether link is operational and PHY state is up when available. */
+static te_errno
+tapi_cfg_base_if_link_ready(const char *ta, const char *iface, bool *ready)
+{
+    int oper_status;
+    int phy_state;
+    te_errno rc;
+
+    *ready = false;
+
+    rc = cfg_get_instance_int_sync_fmt(&oper_status,
+                                       "/agent:%s/interface:%s/oper_status:",
+                                       ta, iface);
+    if (rc != 0)
+        return rc;
+
+    if (oper_status == 0)
+        return 0;
+
+    rc = tapi_cfg_phy_state_get(ta, iface, &phy_state);
+    if (rc == 0)
+    {
+        *ready = (phy_state == TE_PHY_STATE_UP);
+        return 0;
+    }
+
+    if (TE_RC_GET_ERROR(rc) == TE_EOPNOTSUPP ||
+        TE_RC_GET_ERROR(rc) == TE_ENOENT)
+    {
+        *ready = true;
+        return 0;
+    }
+
+    return rc;
+}
+
 /* See description in tapi_cfg_base.h */
 te_errno
 tapi_cfg_base_if_await_link_up(const char *ta, const char *iface,
@@ -1508,30 +1544,40 @@ tapi_cfg_base_if_await_link_up(const char *ta, const char *iface,
                                unsigned int after_up_ms)
 {
     unsigned int i = 0;
-    int oper_status;
+    bool ready;
     te_errno rc;
 
     if (ta == NULL || iface == NULL)
         return TE_RC(TE_TAPI, TE_EINVAL);
 
-    do {
-        if (i != 0)
-            usleep(wait_int_ms * 1000);
-
-        rc = cfg_get_instance_int_sync_fmt(&oper_status,
-                                           "/agent:%s/interface:%s/oper_status:",
-                                           ta, iface);
-    } while (rc == 0 && oper_status == 0 && i++ < nb_attempts);
-
-    if (rc == 0)
+    while (true)
     {
-        if (oper_status == 1)
-            usleep(after_up_ms * 1000);
-        else
-            rc = TE_RC(TE_TAPI, TE_ETIMEDOUT);
+        if (i != 0)
+            usleep(TE_MS2US(wait_int_ms));
+
+        rc = tapi_cfg_base_if_link_ready(ta, iface, &ready);
+        if (rc != 0)
+            return rc;
+
+        if (ready && after_up_ms != 0)
+        {
+            usleep(TE_MS2US(after_up_ms));
+
+            rc = tapi_cfg_base_if_link_ready(ta, iface, &ready);
+            if (rc != 0)
+                return rc;
+        }
+
+        if (ready)
+            return 0;
+
+        if (i == nb_attempts)
+            break;
+
+        i++;
     }
 
-    return rc;
+    return TE_RC(TE_TAPI, TE_ETIMEDOUT);
 }
 
 /* See description in tapi_cfg_base.h */
