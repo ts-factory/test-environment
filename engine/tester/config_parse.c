@@ -389,19 +389,27 @@ get_node_with_text_content(xmlNodePtr *node, const char *name,
  * @param cfg           Tester configuration context
  * @param name          Name in the current test package
  * @param is_package    Is requested entity package or test script?
+ * @param execute       Path to executable. If not NULL it is used
+ *                      instead of name
  *
  * @return Allocated path or NULL.
  */
 static char *
-name_to_path(tester_cfg *cfg, const char *name, bool is_package)
+name_to_path(tester_cfg *cfg, const char *name, bool is_package,
+             const char *execute)
 {
     char *path = NULL;
+    size_t name_or_execute_len;
+    const char *name_in_path;
 
     if (name == NULL)
     {
         ERROR("Invalid name in the Test Package");
         return NULL;
     }
+
+    name_or_execute_len = (execute == NULL) ? strlen(name) : strlen(execute);
+    name_in_path = (execute == NULL) ? name : execute;
 
     if (cfg->cur_pkg != NULL)
     {
@@ -414,7 +422,7 @@ name_to_path(tester_cfg *cfg, const char *name, bool is_package)
             return NULL;
         }
         path = malloc((base_name_end - cfg->cur_pkg->path) + 1 +
-                      strlen(name) + package_add + 1);
+                      name_or_execute_len + package_add + 1);
         if (path == NULL)
         {
             ERROR("malloc() failed");
@@ -425,7 +433,7 @@ name_to_path(tester_cfg *cfg, const char *name, bool is_package)
                (base_name_end - cfg->cur_pkg->path) + 1);
         path[(base_name_end - cfg->cur_pkg->path) + 1] = '\0';
         /* Concat package name to the path */
-        strcat(path, name);
+        strcat(path, name_in_path);
         if (is_package)
         {
             /* Concat "/package.xml" */
@@ -457,7 +465,7 @@ name_to_path(tester_cfg *cfg, const char *name, bool is_package)
                 return NULL;
             }
 
-            path = malloc(strlen(base) + strlen("/") + strlen(name) +
+            path = malloc(strlen(base) + strlen("/") + name_or_execute_len +
                           strlen("/package.xml") + 1);
             if (path == NULL)
             {
@@ -468,7 +476,7 @@ name_to_path(tester_cfg *cfg, const char *name, bool is_package)
             strcpy(path, base);
             strcat(path, "/");
             /* Concat package name to the path */
-            strcat(path, name);
+            strcat(path, name_in_path);
         }
         else
         {
@@ -492,6 +500,45 @@ name_to_path(tester_cfg *cfg, const char *name, bool is_package)
     return path;
 }
 
+/**
+ * Get execute path.
+ *
+ * @param node          Location of the XML 'execute' node pointer
+ * @param cfg           Tester configuration context
+ * @param script_name   Script name
+ * @param content       Location for the result
+ *
+ * @return Status code.
+ */
+static te_errno
+get_execute_with_text_content(xmlNodePtr *node, tester_cfg *cfg,
+                              const char *script_name, char **content)
+{
+    te_errno rc;
+    char *execute;
+
+    if (xmlStrcmp((*node)->name, CONST_CHAR2XML("execute")) != 0)
+        return TE_ENOENT;
+
+    rc = get_text_content(*node, "execute", &execute);
+    if (rc != 0)
+        return rc;
+    if (execute[0] == '/')
+    {
+        *content = execute;
+        return 0;
+    }
+
+    *content = name_to_path(cfg, script_name, false, execute);
+    if (*content == NULL)
+        rc = TE_EFAIL;
+    free(execute);
+
+    if (rc == 0)
+        *node = xmlNodeNext(*node);
+
+    return rc;
+}
 
 /**
  * Get string.
@@ -1338,8 +1385,9 @@ get_script(xmlNodePtr node, tester_cfg *cfg, run_item *ritem)
                 return TE_RC(TE_TESTER, TE_EINVAL);
             }
             execute_found = true;
-            script->execute = XML2CHAR_DUP(node->content);
-            node = xmlNodeNext(node);
+            if ((rc = get_execute_with_text_content(&node, cfg, script->name,
+                                                    &script->execute)) != 0)
+                return rc;
             continue;
         }
         break;
@@ -1376,7 +1424,7 @@ get_script(xmlNodePtr node, tester_cfg *cfg, run_item *ritem)
 
     if (script->execute == NULL)
     {
-        script->execute = name_to_path(cfg, script->name, false);
+        script->execute = name_to_path(cfg, script->name, false, NULL);
     }
     if (script->execute == NULL)
     {
@@ -3180,7 +3228,7 @@ parse_test_package(tester_cfg *cfg, const test_session *session,
 
     if ((pkg->path = name_to_path(cfg,
                                 src != NULL ? src : pkg->name,
-                                src != NULL ? false : true)) == NULL)
+                                src != NULL ? false : true, NULL)) == NULL)
     {
         ERROR("Failed to make path to Test Package file by name and "
               "context");
@@ -3190,7 +3238,7 @@ parse_test_package(tester_cfg *cfg, const test_session *session,
     cur_pkg_save = cfg->cur_pkg;
     cfg->cur_pkg = pkg;
 
-    ti_path = name_to_path(cfg, "tests-info.xml", false);
+    ti_path = name_to_path(cfg, "tests-info.xml", false, NULL);
     if (ti_path == NULL)
     {
         ERROR("Failed to make path to Test Package file by name and "
