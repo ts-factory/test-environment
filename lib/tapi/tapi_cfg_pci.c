@@ -26,6 +26,7 @@
 
 #define CFG_PCI_TA_DEVICE_FMT "/agent:%s/hardware:/pci:/device:%s"
 #define CFG_PCI_TA_VEND_DEVICE_FMT "/agent:%s/hardware:/pci:/vendor:%s/device:%s"
+#define CFG_PCI_TA_DRIVER_DEVICE_FMT "/agent:%s/module:*/driver:pci:%s/device:*"
 
 te_errno
 tapi_cfg_pci_get_pci_vendor_device(const char *ta, const char *pci_addr,
@@ -727,6 +728,56 @@ out:
     if (rc != 0 || pci_oids == NULL)
     {
         for (i = 0; result != NULL && i < n_instances; i++)
+            free(result[i]);
+
+        free(result);
+    }
+
+    return rc;
+}
+
+te_errno
+tapi_cfg_pci_devices_by_driver(const char *ta, const char *driver,
+                               unsigned int *size, char ***pci_oids)
+{
+    cfg_handle *devices = NULL;
+    unsigned int n_devices = 0;
+    char **result = NULL;
+    unsigned int i;
+    te_errno rc;
+
+    if (ta == NULL || driver == NULL || size == NULL)
+    {
+        ERROR("%s(): invalid argument", __FUNCTION__);
+        return TE_RC(TE_TAPI, TE_EINVAL);
+    }
+
+    rc = cfg_find_pattern_fmt(&n_devices, &devices, CFG_PCI_TA_DRIVER_DEVICE_FMT,
+                              ta, driver);
+    if (rc != 0)
+        goto out;
+
+    result = TE_ALLOC(n_devices * sizeof(*result));
+
+    for (i = 0; i < n_devices; i++)
+    {
+        rc = cfg_get_instance(devices[i], NULL, &result[i]);
+        if (rc != 0)
+        {
+            ERROR("Failed to get PCI device for driver '%s'", driver);
+            goto out;
+        }
+    }
+
+    *size = n_devices;
+    if (pci_oids != NULL)
+        *pci_oids = result;
+
+out:
+    free(devices);
+    if (rc != 0 || pci_oids == NULL)
+    {
+        for (i = 0; result != NULL && i < n_devices; i++)
             free(result[i]);
 
         free(result);

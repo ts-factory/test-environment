@@ -243,6 +243,22 @@ extern te_errno tapi_cfg_pci_get_driver(const char *pci_oid,
                                         char **driver);
 
 /**
+ * Get PCI devices bound to a given PCI driver on a Test Agent.
+ *
+ * @param[in]  ta           Test Agent name.
+ * @param[in]  driver       PCI driver name.
+ * @param[out] size         Count of @p pci_oids.
+ * @param[out] pci_oids     OIDs of found devices (/agent/hardware/pci/device).
+ *                          May be @c NULL to only get the count.
+ *
+ * @return Status code
+ */
+extern te_errno tapi_cfg_pci_devices_by_driver(const char *ta,
+                                               const char *driver,
+                                               unsigned int *size,
+                                               char ***pci_oids);
+
+/**
  * Bind driver to a PCI device
  *
  * @param[in]  pci_oid      PCI device OID (/agent/hardware/pci/device or
