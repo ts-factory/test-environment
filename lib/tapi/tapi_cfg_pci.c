@@ -28,6 +28,37 @@
 #define CFG_PCI_TA_VEND_DEVICE_FMT "/agent:%s/hardware:/pci:/vendor:%s/device:%s"
 #define CFG_PCI_TA_DRIVER_DEVICE_FMT "/agent:%s/module:*/driver:pci:%s/device:*"
 
+static te_errno
+pci_addr_get_dbdf(const char *pci_addr, unsigned int *domain,
+                  unsigned int *bus, unsigned int *device,
+                  unsigned int *function)
+{
+    unsigned int domain_tmp;
+    unsigned int bus_tmp;
+    unsigned int device_tmp;
+    unsigned int function_tmp;
+
+    if (pci_addr == NULL)
+        return TE_RC(TE_TAPI, TE_EINVAL);
+
+    if (sscanf(pci_addr, "%x:%x:%x.%x", &domain_tmp, &bus_tmp, &device_tmp,
+               &function_tmp) != 4)
+    {
+        return TE_RC(TE_TAPI, TE_EINVAL);
+    }
+
+    if (domain != NULL)
+        *domain = domain_tmp;
+    if (bus != NULL)
+        *bus = bus_tmp;
+    if (device != NULL)
+        *device = device_tmp;
+    if (function != NULL)
+        *function = function_tmp;
+
+    return 0;
+}
+
 te_errno
 tapi_cfg_pci_get_pci_vendor_device(const char *ta, const char *pci_addr,
                                    char **vendor, char **device)
@@ -646,6 +677,72 @@ tapi_cfg_pci_get_driver(const char *pci_oid, char **driver)
         ERROR("Failed to get current driver of PCI device %s", pci_device);
 
     free(pci_device);
+    return rc;
+}
+
+te_errno
+tapi_cfg_pci_is_pf(const char *pci_oid, bool *is_pf)
+{
+    char *pci_device = NULL;
+    char *parent_oid = NULL;
+    te_errno rc;
+
+    if (pci_oid == NULL || is_pf == NULL)
+    {
+        ERROR("%s(): invalid argument", __FUNCTION__);
+        return TE_RC(TE_TAPI, TE_EINVAL);
+    }
+
+    rc = tapi_cfg_pci_resolve_device_oid(&pci_device, "%s", pci_oid);
+    if (rc != 0)
+        return rc;
+
+    rc = cfg_get_instance_string_fmt(&parent_oid, "%s/sriov:/pf:",
+                                     pci_device);
+    free(pci_device);
+
+    if (TE_RC_GET_ERROR(rc) == TE_ENOENT)
+    {
+        *is_pf = true;
+        return 0;
+    }
+
+    if (rc != 0)
+        return rc;
+
+    *is_pf = te_str_is_null_or_empty(parent_oid);
+    free(parent_oid);
+
+    return 0;
+}
+
+te_errno
+tapi_cfg_pci_get_dbdf(const char *pci_oid, unsigned int *domain,
+                      unsigned int *bus, unsigned int *device,
+                      unsigned int *function)
+{
+    char *pci_device = NULL;
+    char *pci_addr = NULL;
+    te_errno rc;
+
+    if (pci_oid == NULL)
+    {
+        ERROR("%s(): invalid argument", __FUNCTION__);
+        return TE_RC(TE_TAPI, TE_EINVAL);
+    }
+
+    rc = tapi_cfg_pci_resolve_device_oid(&pci_device, "%s", pci_oid);
+    if (rc != 0)
+        return rc;
+
+    pci_addr = cfg_oid_str_get_inst_name(pci_device, 4);
+    free(pci_device);
+    if (pci_addr == NULL)
+        return TE_RC(TE_TAPI, TE_EINVAL);
+
+    rc = pci_addr_get_dbdf(pci_addr, domain, bus, device, function);
+    free(pci_addr);
+
     return rc;
 }
 

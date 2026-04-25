@@ -243,6 +243,35 @@ extern te_errno tapi_cfg_pci_get_driver(const char *pci_oid,
                                         char **driver);
 
 /**
+ * Check whether a PCI function is a Physical Function.
+ *
+ * @param[in]  pci_oid      PCI device OID (/agent/hardware/pci/device or
+ *                          /agent/hardware/pci/vendor/device/instance).
+ * @param[out] is_pf        @c true if the function is PF.
+ *
+ * @return Status code.
+ */
+extern te_errno tapi_cfg_pci_is_pf(const char *pci_oid, bool *is_pf);
+
+/**
+ * Get PCI DBDF components of a PCI function.
+ *
+ * @param[in]  pci_oid      PCI device OID (/agent/hardware/pci/device or
+ *                          /agent/hardware/pci/vendor/device/instance).
+ * @param[out] domain       PCI domain (may be @c NULL to ignore).
+ * @param[out] bus          PCI bus (may be @c NULL to ignore).
+ * @param[out] device       PCI device (may be @c NULL to ignore).
+ * @param[out] function     PCI function (may be @c NULL to ignore).
+ *
+ * @return Status code.
+ */
+extern te_errno tapi_cfg_pci_get_dbdf(const char *pci_oid,
+                                      unsigned int *domain,
+                                      unsigned int *bus,
+                                      unsigned int *device,
+                                      unsigned int *function);
+
+/**
  * Get PCI devices bound to a given PCI driver on a Test Agent.
  *
  * @param[in]  ta           Test Agent name.
