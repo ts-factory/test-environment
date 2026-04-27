@@ -957,6 +957,19 @@ test_get_test_id(int argc, char **argv)
     return value;
 }
 
+/* See description in tapi_test.h */
+const char *
+test_get_test_name(int argc, char **argv)
+{
+    const char *str_val;
+
+    str_val = test_get_param(argc, argv, "te_test_name");
+    if (str_val == NULL)
+        ERROR("te_test_name parameter not found");
+
+    return str_val;
+}
+
 static unsigned int
 test_get_rand_uint(const char *name, const char *str_val)
 {

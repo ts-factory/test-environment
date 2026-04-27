@@ -54,13 +54,6 @@ extern "C" {
  * @{
  */
 
-#ifndef TE_LGR_USER
-/* Tests must define TE_TEST_NAME to be used as 'te_lgr_entity'. */
-#ifndef TE_TEST_NAME
-#error TE_TEST_NAME must be defined before include of tapi_test.h
-#endif
-#endif
-
 /**
  * Define empty list of test-specific variables
  * if test does not care about them.
@@ -183,7 +176,8 @@ extern "C" {
     argc--;                                                         \
     argv++;                                                         \
                                                                     \
-    te_log_init(TE_TEST_NAME, ten_log_message);                     \
+    te_current_test_name = test_get_test_name(argc, argv);          \
+    te_log_init(te_test_name(), ten_log_message);                   \
                                                                     \
     /*                                                              \
      * Install SIGINT signal handler to exit() with failure status, \
@@ -701,7 +695,7 @@ cleanup_specific:                                                   \
  * @return uint64 value.
  */
 #define TEST_DEFAULT_UINT64_PARAM(var_name_) \
-    test_get_default_uint64_param(TE_TEST_NAME, #var_name_)
+    test_get_default_uint64_param(te_test_name(), #var_name_)
 
 /**
  * The macro to return default value of 'double' parameter
@@ -712,7 +706,7 @@ cleanup_specific:                                                   \
  * @return double value.
  */
 #define TEST_DEFAULT_DOUBLE_PARAM(var_name_) \
-    test_get_default_double_param(TE_TEST_NAME, #var_name_)
+    test_get_default_double_param(te_test_name(), #var_name_)
 
 /**
  * The macro to get default value of 'uint64' parameter
@@ -1214,6 +1208,9 @@ typedef enum {
 /** ID assigned by the Tester to the test instance */
 extern unsigned int te_test_id;
 
+/** Name of test instance */
+extern const char *te_current_test_name;
+
 /**
  * Check whether SIGUSR2 signal has ever been caught
  *
@@ -1341,6 +1338,17 @@ extern int test_get_int_param(int argc, char **argv,
  * @return TE test ID
  */
 extern unsigned int test_get_test_id(int argc, char **argv);
+
+/**
+ * Dedicated function to get te_test_name before
+ * any jump points installed.
+ *
+ * @param argc        Count of arguments
+ * @param argv        List of arguments
+ *
+ * @return TE test name
+ */
+extern const char *test_get_test_name(int argc, char **argv);
 
 /**
  * Return parameters of type 'uint'
@@ -1877,6 +1885,22 @@ test_sleep_scale(void)
     }
 
     return scale;
+}
+
+/**
+ * Function to get test name. It would be TE_TEST_NAME if it is defined or
+ * the value of te_test_name argument.
+ *
+ * @return Test name.
+ */
+static inline const char *
+te_test_name(void)
+{
+#ifdef TE_TEST_NAME
+    return TE_TEST_NAME;
+#else
+    return te_current_test_name;
+#endif
 }
 
 /**

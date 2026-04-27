@@ -44,6 +44,7 @@ extern "C" {
 /** See description in tapi_test.h */
 unsigned int te_test_id = TE_LOG_ID_UNDEFINED;
 
+const char *te_current_test_name = NULL;
 
 /** Log message transport */
 typedef void (* te_log_message_tx_f)(const void *msg, size_t len);
