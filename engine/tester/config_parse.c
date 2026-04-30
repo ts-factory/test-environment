@@ -1385,8 +1385,13 @@ get_script(xmlNodePtr node, tester_cfg *cfg, run_item *ritem)
                 return TE_RC(TE_TESTER, TE_EINVAL);
             }
             execute_found = true;
-            if ((rc = get_execute_with_text_content(&node, cfg, script->name,
-                                                    &script->execute)) != 0)
+            if (ritem->role == RI_ROLE_TEMPLATE)
+                rc = get_node_with_text_content(&node, "execute",
+                                                &script->execute);
+            else
+                rc = get_execute_with_text_content(&node, cfg, script->name,
+                                                   &script->execute);
+            if (rc != 0)
                 return rc;
             continue;
         }
@@ -1410,8 +1415,9 @@ get_script(xmlNodePtr node, tester_cfg *cfg, run_item *ritem)
             script->objective = TE_STRDUP(tmpl_script->objective);
         if (script->page == NULL)
             script->page = TE_STRDUP(tmpl_script->page);
-        if (script->execute == NULL)
-            script->execute = TE_STRDUP(tmpl_script->execute);
+        if (script->execute == NULL && tmpl_script->execute != NULL)
+            script->execute = name_to_path(cfg, script->name, false,
+                                           tmpl_script->execute);
         if (script->attrs.timeout.tv_sec == TESTER_TIMEOUT_DEF)
             script->attrs.timeout.tv_sec = tmpl_script->attrs.timeout.tv_sec;
         if (script->attrs.track_conf == TESTER_TRACK_CONF_UNSPEC)
