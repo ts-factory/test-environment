@@ -2005,7 +2005,11 @@ te_test_name(void)
 #define USLEEP(_to_sleep)   te_usleep(test_sleep_scale() * (_to_sleep))
 
 /** Time to wait for a network activity, milliseconds. */
+#ifndef TAPI_WAIT_NETWORK_DELAY_MULTIPLIER
 #define TAPI_WAIT_NETWORK_DELAY 500
+#else
+#define TAPI_WAIT_NETWORK_DELAY (500 * TAPI_WAIT_NETWORK_DELAY_MULTIPLIER)
+#endif
 
 /** Wait for network action to complete. Typically, send() on one side
  * and wait before non-blocing recv() on another side. */
