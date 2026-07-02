@@ -26,6 +26,13 @@
       d: |
         Executable to run with search in PATH if there is no path separators.
 
+    - oid: "/agent/process/sleep"
+      access: read_write
+      type: uint32
+      d: |
+        Delay after starting the process, in milliseconds.
+        For use in Configurator config scripts.
+
     - oid: "/agent/process/status"
       access: read_write
       type: int32
