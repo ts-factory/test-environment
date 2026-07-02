@@ -28,6 +28,7 @@
 #include "te_shell_cmd.h"
 #include "te_str.h"
 #include "te_sigmap.h"
+#include "te_sleep.h"
 #include "rcf_pch.h"
 #include "agentlib.h"
 #include "conf_common.h"
@@ -84,6 +85,7 @@ struct ps_entry {
     bool enabled;
     char                   *name;
     char                   *exe;
+    unsigned int            sleep;
     ps_arg_list_t           args;
     unsigned int            argc;
     ps_env_list_t           envs;
@@ -872,6 +874,50 @@ ps_del(unsigned int gid, const char *oid,
 }
 
 static te_errno
+ps_sleep_get(unsigned int gid, const char *oid, char *value,
+           const char *ps_name)
+{
+    struct ps_entry *ps;
+
+    UNUSED(gid);
+    UNUSED(oid);
+
+    ENTRY("%s", ps_name);
+
+    ps = ps_find(ps_name);
+    if (ps == NULL)
+        return TE_RC(TE_TA_UNIX, TE_ENOENT);
+
+    snprintf(value, RCF_MAX_VAL, "%u", ps->sleep);
+
+    return 0;
+}
+
+static te_errno
+ps_sleep_set(unsigned int gid, const char *oid, const char *value,
+           const char *ps_name)
+{
+    te_errno rc;
+    struct ps_entry *ps;
+
+    UNUSED(gid);
+    UNUSED(oid);
+
+    ENTRY("%s", ps_name);
+
+    ps = ps_find(ps_name);
+    if (ps == NULL)
+        return TE_RC(TE_TA_UNIX, TE_ENOENT);
+
+    if (ps->enabled)
+        return TE_RC(TE_TA_UNIX, TE_EBUSY);
+
+    rc = te_strtoui(value, 10, &ps->sleep);
+
+    return rc;
+}
+
+static te_errno
 ps_exe_get(unsigned int gid, const char *oid, char *value,
            const char *ps_name)
 {
@@ -1009,6 +1055,8 @@ ps_status_set(unsigned int gid, const char *oid, const char *value,
             ps->autorestart_failed = false;
             ps->time_until_check = ps->autorestart;
         }
+        if (rc == 0 && ps->sleep > 0)
+            te_motivated_msleep(ps->sleep, "Give process some time to start");
     }
     else
     {
@@ -1816,7 +1864,10 @@ RCF_PCH_CFG_NODE_RW_COLLECTION(node_ps_opt, "option", NULL, &node_ps_env,
                                ps_opt_get, NULL, ps_opt_add,
                                ps_opt_del, ps_opt_list, NULL);
 
-RCF_PCH_CFG_NODE_RW_WITH_SUBST(node_ps_exe, "exe", NULL, &node_ps_opt,
+RCF_PCH_CFG_NODE_RW(node_ps_sleep, "sleep", NULL, &node_ps_opt,
+                    ps_sleep_get, ps_sleep_set);
+
+RCF_PCH_CFG_NODE_RW_WITH_SUBST(node_ps_exe, "exe", NULL, &node_ps_sleep,
                                ps_exe_get, ps_exe_set, subst);
 
 RCF_PCH_CFG_NODE_RO(node_ps_exit_status_type, "type", NULL, NULL,
