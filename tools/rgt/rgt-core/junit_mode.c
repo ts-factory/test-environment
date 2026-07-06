@@ -29,6 +29,7 @@
 
 #include "te_alloc.h"
 #include "te_errno.h"
+#include "te_yaml.h"
 #include "tq_string.h"
 
 /**
@@ -243,10 +244,13 @@ junit_process_test_start(node_info_t *node, ctrl_msg_data *data)
 {
     tqe_string    *tqe_str;
     double         time_val;
+    const char    *exclude_warn_err;
 
     UNUSED(data);
 
-    if (ew_log_obstk == NULL)
+    exclude_warn_err = getenv("TE_RGT_JUNIT_EXCLUDE_WARN_ERR");
+
+    if (ew_log_obstk == NULL && !te_yaml_value_is_true(exclude_warn_err))
         ew_log_obstk = obstack_initialize();
 
     fputs("<testcase classname=\"", rgt_ctx.out_fd);
