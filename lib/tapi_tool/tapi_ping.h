@@ -36,6 +36,12 @@ typedef struct tapi_ping_opt {
     unsigned int packet_size;
 
     /**
+     * Number of seconds to wait for response.
+     * Zero value means infinite timeout.
+     */
+    tapi_job_opt_double_t packet_wait;
+
+    /**
      * Number of seconds to wait between sending packets.
      * By default ping waits for one second.
      */
