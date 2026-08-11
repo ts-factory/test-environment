@@ -693,7 +693,7 @@ embed_yaml_target_in_xml(xmlNodePtr xn_cmd, xmlNodePtr xn_target,
 static te_errno
 parse_config_yaml_include_doc(parse_config_yaml_ctx *ctx, yaml_node_t *n)
 {
-    char *file_name;
+    te_string file_name = TE_STRING_INIT;
     te_errno rc = 0;
     te_errno rc_resolve_pathname = 0;
     char *resolved_file_name = NULL;
@@ -704,8 +704,19 @@ parse_config_yaml_include_doc(parse_config_yaml_ctx *ctx, yaml_node_t *n)
         return TE_EINVAL;
     }
 
-    file_name = (char *)n->data.scalar.value;
-    rc_resolve_pathname = te_file_resolve_pathname(file_name, ctx->conf_dirs,
+    /* We do not have access to expand_vars here, use environment instead */
+    rc = te_string_expand_env_vars((const char *)n->data.scalar.value, NULL,
+                                   &file_name);
+    if (rc != 0)
+    {
+        ERROR(CS_YAML_ERR_PREFIX "value %s specified in "
+              "include node failed to be expanded with error %r",
+              (const char *)n->data.scalar.value, rc);
+        te_string_free(&file_name);
+        return TE_EINVAL;
+    }
+    rc_resolve_pathname = te_file_resolve_pathname(te_string_value(&file_name),
+                                                   ctx->conf_dirs,
                                                    F_OK, ctx->file_path,
                                                    &resolved_file_name);
     if (rc_resolve_pathname == 0)
@@ -718,10 +729,11 @@ parse_config_yaml_include_doc(parse_config_yaml_ctx *ctx, yaml_node_t *n)
         ERROR(CS_YAML_ERR_PREFIX "document %s specified in "
               "include node is not found. "
               "te_file_resolve_pathname() produce error %d",
-              file_name, rc_resolve_pathname);
+              te_string_value(&file_name), rc_resolve_pathname);
         rc = TE_EINVAL;
     }
     free(resolved_file_name);
+    te_string_free(&file_name);
     return rc;
 }
 
