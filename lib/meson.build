@@ -40,6 +40,7 @@ te_common_libs = [
     'rpc_dpdk',
     'rpc_types',
     'ovs_flow',
+    'tapi_cfg_wifi',
 ]
 
 # Test Engine libraries
@@ -93,6 +94,7 @@ te_agent_libs = [
     'tad',
     'ta_job',
     'ta_restconf',
+    'ta_wifi',
     'rpcs_bpf',
     'rpcs_dpdk',
     'rpcs_job',
