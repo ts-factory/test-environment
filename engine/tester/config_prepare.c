@@ -33,9 +33,15 @@
 #include "te_defs.h"
 #include "te_errno.h"
 #include "te_queue.h"
+#include "te_string.h"
+#include "te_str.h"
+#include "te_kvpair.h"
+#include "te_compound.h"
+#include "te_expand.h"
 #include "logger_api.h"
 
 #include "tester_conf.h"
+#include "tester_flags.h"
 #include "type_lib.h"
 
 
@@ -65,6 +71,9 @@ typedef struct config_prepare_ctx {
     run_item           *keepalive;  /**< Current keep-alive handler */
     unsigned int        track_conf; /**< Current track_conf attribute */
 
+    const char         *pkg_path;   /**< Package file the current session
+                                         comes from */
+
 } config_prepare_ctx;
 
 /**
@@ -75,6 +84,13 @@ typedef struct config_prepare_data {
     SLIST_HEAD(, config_prepare_ctx) ctxs;   /**< Stack of contexts */
 
     te_errno                        rc;     /**< Status code */
+
+    bool                            expand; /**< Expansion is enabled for
+                                                 the configuration file
+                                                 being prepared */
+    const char                     *new_pkg_path; /**< Path of the package
+                                                       file whose session is
+                                                       about to be entered */
 
 } config_prepare_data;
 
@@ -151,6 +167,7 @@ config_prepare_new_ctx(config_prepare_data *gctx)
         new_ctx->exception = cur_ctx->exception;
         new_ctx->keepalive = cur_ctx->keepalive;
         new_ctx->track_conf = cur_ctx->track_conf;
+        new_ctx->pkg_path = cur_ctx->pkg_path;
     }
     else
     {
@@ -426,12 +443,13 @@ prepare_cfg_start(tester_cfg *cfg, unsigned int cfg_id_off, void *opaque)
     config_prepare_data    *gctx = opaque;
     config_prepare_ctx     *ctx;
 
-    UNUSED(cfg);
     UNUSED(cfg_id_off);
 
     assert(gctx != NULL);
     ctx = SLIST_FIRST(&gctx->ctxs);
     assert(ctx != NULL);
+
+    gctx->expand = (cfg->syntax_flags & TESTER_EXPAND_VARS) != 0;
 
     if (config_prepare_new_ctx(gctx) == NULL)
         return TESTER_CFG_WALK_FAULT;
@@ -460,6 +478,21 @@ prepare_cfg_end(tester_cfg *cfg, unsigned int cfg_id_off, void *opaque)
 }
 
 static tester_cfg_walk_ctl
+prepare_pkg_start(run_item *ri, test_package *pkg, unsigned int cfg_id_off,
+                  void *opaque)
+{
+    config_prepare_data *gctx = opaque;
+
+    UNUSED(ri);
+    UNUSED(cfg_id_off);
+
+    assert(gctx != NULL);
+    gctx->new_pkg_path = pkg->path;
+
+    return TESTER_CFG_WALK_CONT;
+}
+
+static tester_cfg_walk_ctl
 prepare_session_start(run_item *ri, test_session *session,
                       unsigned int cfg_id_off, void *opaque)
 {
@@ -473,6 +506,16 @@ prepare_session_start(run_item *ri, test_session *session,
 
     if ((ctx =  config_prepare_new_ctx(gctx)) == NULL)
         return TESTER_CFG_WALK_FAULT;
+
+    /*
+     * pkg_start() is called just before the session of the package is
+     * entered, so the announced path belongs to this very session.
+     */
+    if (gctx->new_pkg_path != NULL)
+    {
+        ctx->pkg_path = gctx->new_pkg_path;
+        gctx->new_pkg_path = NULL;
+    }
 
     /* Service executables inheritance */
     inherit_executable(&session->exception, &session->flags,
@@ -552,6 +595,209 @@ prepare_session_end(run_item *ri, test_session *session,
     return TESTER_CFG_WALK_CONT;
 }
 
+/** Data to be passed as opaque to expand_check_* callbacks. */
+typedef struct expand_check_data {
+    const run_item     *ri;         /**< Run item being checked */
+    const test_var_arg *va;         /**< Argument being enumerated */
+    te_kvpair_h        *kvpairs;    /**< Names available for expansion */
+    const char         *pkg_path;   /**< Package file for diagnostics */
+    te_errno            rc;         /**< Status of the check */
+} expand_check_data;
+
+/**
+ * Bind one value of a compound argument in the validation context.
+ *
+ * The function complies with te_compound_iter_fn prototype.
+ */
+static te_errno
+expand_check_field_cb(char *key, size_t idx, char *value, bool has_more,
+                      void *user)
+{
+    expand_check_data *data = user;
+    te_string name = TE_STRING_INIT;
+
+    UNUSED(value);
+    UNUSED(has_more);
+
+    te_compound_build_name(&name, data->va->name, key, idx);
+    te_kvpair_push(data->kvpairs, te_string_value(&name), "%s", "");
+    te_string_free(&name);
+
+    return 0;
+}
+
+/**
+ * Bind the names provided by a single declared value.
+ *
+ * The function complies with test_entity_value_enum_cb prototype.
+ */
+static te_errno
+expand_check_value_cb(const test_entity_value *value, void *opaque)
+{
+    expand_check_data *data = opaque;
+
+    if (value->plain != NULL)
+        te_compound_iterate_str(value->plain, expand_check_field_cb, data);
+
+    return 0;
+}
+
+/**
+ * Bind the name of an argument and of every field of its values.
+ *
+ * The function complies with test_var_arg_enum_cb prototype.
+ */
+static te_errno
+expand_check_arg_cb(const test_var_arg *va, void *opaque)
+{
+    expand_check_data *data = opaque;
+
+    data->va = va;
+    te_kvpair_push(data->kvpairs, va->name, "%s", "");
+    (void)test_var_arg_enum_values(data->ri, va, expand_check_value_cb,
+                                   data, NULL, NULL);
+    data->va = NULL;
+
+    return 0;
+}
+
+/**
+ * Check that every variable reference in @p src can be resolved.
+ *
+ * Only an unknown name is fatal.  Every known name is bound to an
+ * empty placeholder here, so a filter may fail on a value it would
+ * never see at run time; such a failure says nothing about the
+ * reference itself and must not stop the run.
+ *
+ * @param data  Validation context.
+ * @param what  Human readable name of the string being checked.
+ * @param src   String to check (may be @c NULL).
+ */
+static void
+expand_check_string(expand_check_data *data, const char *what,
+                    const char *src)
+{
+    te_string out = TE_STRING_INIT;
+    te_errno rc;
+
+    if (src == NULL || strstr(src, "${") == NULL)
+        return;
+
+    rc = te_string_expand_kvpairs_strict(src, NULL, data->kvpairs, &out);
+    if (TE_RC_GET_ERROR(rc) == TE_ENOENT)
+    {
+        ERROR("Cannot expand %s of the run item '%s' in '%s': %r; "
+              "the text is '%s'", what, run_item_name(data->ri),
+              te_str_empty_if_null(data->pkg_path), rc, src);
+        data->rc = TE_RC(TE_TESTER, TE_ENOENT);
+    }
+    else if (rc != 0)
+    {
+        INFO("Cannot check %s of the run item '%s' in '%s': %r; "
+             "the text is '%s'", what, run_item_name(data->ri),
+             te_str_empty_if_null(data->pkg_path), rc, src);
+    }
+    te_string_free(&out);
+}
+
+/**
+ * Check the objectives of every declared value of an argument.
+ *
+ * The function complies with test_entity_value_enum_cb prototype.
+ */
+static te_errno
+expand_check_value_objective_cb(const test_entity_value *value, void *opaque)
+{
+    expand_check_data *data = opaque;
+
+    expand_check_string(data, "a value objective", value->objective);
+
+    return 0;
+}
+
+/**
+ * Check the objectives of every argument of the run item.
+ *
+ * The function complies with test_var_arg_enum_cb prototype.
+ */
+static te_errno
+expand_check_arg_objectives_cb(const test_var_arg *va, void *opaque)
+{
+    expand_check_data *data = opaque;
+
+    data->va = va;
+    (void)test_var_arg_enum_values(data->ri, va,
+                                   expand_check_value_objective_cb,
+                                   data, NULL, NULL);
+    data->va = NULL;
+
+    return 0;
+}
+
+/**
+ * Check every string of a run item that is subject to expansion.
+ *
+ * @param ri        Run item.
+ * @param pkg_path  Package file the run item comes from.
+ *
+ * @return Status code.
+ */
+static te_errno
+expand_check_run_item(const run_item *ri, const char *pkg_path)
+{
+    te_kvpair_h kvpairs;
+    expand_check_data data = {
+        .ri = ri,
+        .va = NULL,
+        .kvpairs = &kvpairs,
+        .pkg_path = pkg_path,
+        .rc = 0,
+    };
+
+    te_kvpair_init(&kvpairs);
+    (void)test_run_item_enum_args(ri, expand_check_arg_cb, false, &data);
+
+    expand_check_string(&data, "the objective", ri->objective);
+    expand_check_string(&data, "the page reference", ri->page);
+
+    switch (ri->type)
+    {
+        case RUN_ITEM_SCRIPT:
+            expand_check_string(&data, "the objective",
+                                ri->u.script.objective);
+            expand_check_string(&data, "the page reference",
+                                ri->u.script.page);
+            break;
+
+        case RUN_ITEM_SESSION:
+            expand_check_string(&data, "the objective",
+                                ri->u.session.objective);
+            break;
+
+        case RUN_ITEM_PACKAGE:
+            /*
+             * Unlike the strings above, the description of a package is
+             * written in the package file itself, not in the file the
+             * run item comes from.
+             */
+            data.pkg_path = ri->u.package->path;
+            expand_check_string(&data, "the objective",
+                                ri->u.package->objective);
+            data.pkg_path = pkg_path;
+            break;
+
+        default:
+            break;
+    }
+
+    (void)test_run_item_enum_args(ri, expand_check_arg_objectives_cb,
+                                  false, &data);
+
+    te_kvpair_fini(&kvpairs);
+
+    return data.rc;
+}
+
 static tester_cfg_walk_ctl
 prepare_test_start(run_item *ri, unsigned int cfg_id_off,
                    unsigned int flags, void *opaque)
@@ -584,6 +830,13 @@ prepare_test_start(run_item *ri, unsigned int cfg_id_off,
             attrs->track_conf = ctx->track_conf;
         else
             attrs->track_conf = TESTER_TRACK_CONF_DEF;
+    }
+
+    if (gctx->expand)
+    {
+        gctx->rc = expand_check_run_item(ri, ctx->pkg_path);
+        if (gctx->rc != 0)
+            return TESTER_CFG_WALK_FAULT;
     }
 
     gctx->rc = prepare_calc_iters(ri);
@@ -686,7 +939,7 @@ tester_prepare_configs(tester_cfgs *cfgs)
     const tester_cfg_walk   cbs = {
         prepare_cfg_start,
         prepare_cfg_end,
-        NULL, /* pkg_start */
+        prepare_pkg_start,
         NULL, /* pkg_end */
         prepare_session_start,
         prepare_session_end,
@@ -714,6 +967,8 @@ tester_prepare_configs(tester_cfgs *cfgs)
     ENTRY();
 
     gctx.rc = 0;
+    gctx.expand = false;
+    gctx.new_pkg_path = NULL;
     SLIST_INIT(&gctx.ctxs);
     if (config_prepare_new_ctx(&gctx) == NULL)
     {
