@@ -628,9 +628,25 @@ lookup_filter(const char *name)
     return NULL;
 }
 
+/**
+ * The context of a single expansion run.
+ */
+typedef struct expand_run_ctx {
+    /** Parameter expansion function */
+    te_expand_param_func expand_param;
+    /** Context for @a expand_param */
+    const void *param_ctx;
+    /** Report undefined references instead of ignoring them */
+    bool strict;
+    /** Status of the expansion, if it has failed */
+    te_errno status;
+} expand_run_ctx;
+
+static te_errno expand_parameters(const char *src, expand_run_ctx *ectx,
+                                  te_string *dest);
+
 static te_errno
-expand_with_filter(te_string *dest, char *ref,
-                   te_expand_param_func expand_param, const void *ctx)
+expand_with_filter(te_string *dest, char *ref, const expand_run_ctx *ectx)
 {
     const char *filter = NULL;
     te_errno rc;
@@ -642,7 +658,7 @@ expand_with_filter(te_string *dest, char *ref,
 
     if (filter == NULL)
     {
-        bool expanded = expand_param(ref, ctx, dest);
+        bool expanded = ectx->expand_param(ref, ectx->param_ctx, dest);
 
         return expanded ? 0 : TE_ENODATA;
     }
@@ -661,7 +677,7 @@ expand_with_filter(te_string *dest, char *ref,
             return TE_EINVAL;
         }
 
-        rc = expand_with_filter(&tmp, ref, expand_param, ctx);
+        rc = expand_with_filter(&tmp, ref, ectx);
         if (rc != 0)
         {
             te_string_free(&tmp);
@@ -675,8 +691,7 @@ expand_with_filter(te_string *dest, char *ref,
 }
 
 static const char *
-process_reference(const char *start, te_expand_param_func expand_param,
-                  const void *ctx, te_string *dest)
+process_reference(const char *start, expand_run_ctx *ectx, te_string *dest)
 {
     const char *end;
 
@@ -707,36 +722,40 @@ process_reference(const char *start, te_expand_param_func expand_param,
         }
 
         prev_len = dest->len;
-        expand_rc = expand_with_filter(dest, ref, expand_param, ctx);
+        expand_rc = expand_with_filter(dest, ref, ectx);
         if (expand_rc != 0 && expand_rc != TE_ENODATA)
+        {
+            ectx->status = expand_rc;
             return NULL;
+        }
 
         if (default_value != NULL)
         {
             if (*default_value == *ALTERNATE_VALUE && expand_rc == 0)
             {
                 te_string_cut(dest, dest->len - prev_len);
-                if (te_string_expand_parameters(default_value + 1,
-                                                expand_param, ctx, dest) != 0)
+                if (expand_parameters(default_value + 1, ectx, dest) != 0)
                     return NULL;
             }
             else if (*default_value == *DEFAULT_VALUE && expand_rc != 0)
             {
-                if (te_string_expand_parameters(default_value + 1,
-                                                expand_param, ctx, dest) != 0)
+                if (expand_parameters(default_value + 1, ectx, dest) != 0)
                     return NULL;
             }
+        }
+        else if (expand_rc == TE_ENODATA && ectx->strict)
+        {
+            ERROR("Undefined reference to '%s'", ref);
+            ectx->status = TE_ENOENT;
+            return NULL;
         }
 
         return end;
     }
 }
 
-/* See description in te_expand.h */
-te_errno
-te_string_expand_parameters(const char *src,
-                            te_expand_param_func expand_param,
-                            const void *ctx, te_string *dest)
+static te_errno
+expand_parameters(const char *src, expand_run_ctx *ectx, te_string *dest)
 {
     const char *next = NULL;
 
@@ -751,12 +770,28 @@ te_string_expand_parameters(const char *src,
         te_string_append(dest, "%.*s", next - src, src);
         next++;
 
-        src = process_reference(next, expand_param, ctx, dest);
+        src = process_reference(next, ectx, dest);
         if (src == NULL)
-            return TE_EINVAL;
+            return ectx->status != 0 ? ectx->status : TE_EINVAL;
     }
 
     return 0;
+}
+
+/* See description in te_expand.h */
+te_errno
+te_string_expand_parameters(const char *src,
+                            te_expand_param_func expand_param,
+                            const void *ctx, te_string *dest)
+{
+    expand_run_ctx ectx = {
+        .expand_param = expand_param,
+        .param_ctx = ctx,
+        .strict = false,
+        .status = 0,
+    };
+
+    return expand_parameters(src, &ectx, dest);
 }
 
 /* See description in te_expand.h */
@@ -777,6 +812,23 @@ te_string_expand_kvpairs(const char *src,
     kvpairs_expand_ctx ctx = {.posargs = posargs, .kvpairs = kvpairs};
 
     return te_string_expand_parameters(src, expand_kvpairs_value, &ctx, dest);
+}
+
+/* See description in te_expand.h */
+te_errno
+te_string_expand_kvpairs_strict(const char *src,
+                                const char *posargs[TE_EXPAND_MAX_POS_ARGS],
+                                const te_kvpair_h *kvpairs, te_string *dest)
+{
+    kvpairs_expand_ctx kvctx = {.posargs = posargs, .kvpairs = kvpairs};
+    expand_run_ctx ectx = {
+        .expand_param = expand_kvpairs_value,
+        .param_ctx = &kvctx,
+        .strict = true,
+        .status = 0,
+    };
+
+    return expand_parameters(src, &ectx, dest);
 }
 
 typedef struct legacy_expand_ctx {

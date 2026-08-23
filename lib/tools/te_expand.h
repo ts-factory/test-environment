@@ -122,6 +122,7 @@ typedef bool (*te_expand_param_func)(const char *name, const void *ctx,
  *
  * @return status code
  * @retval TE_EINVAL  Unmatched `${` found
+ * @retval TE_EILSEQ  Unbalanced braces inside a reference
  *
  * @note If @p src has a valid syntax, the function and its derivatives
  *       may only fail if any of filters fail. All currently implemented
@@ -254,6 +255,38 @@ extern te_errno te_string_expand_kvpairs(const char *src,
                                          te_string *dest);
 
 /**
+ * Like te_string_expand_kvpairs(), but undefined references are errors.
+ *
+ * A reference such as `${name}` that has no associated value and no
+ * `:-` default makes the function fail with #TE_ENOENT after logging
+ * the offending reference. `${name:-default}` and `${name:+alt}` keep
+ * their ordinary meaning, because there a missing value is intentional.
+ *
+ * @note Strictness applies to top-level references only. References
+ *       inside list subscripts and looping constructs are expanded
+ *       through te_string_expand_kvpairs() and stay permissive.
+ *
+ * @note On failure @p dest may already contain a partially expanded
+ *       string.
+ *
+ * @param[in]  src               source string
+ * @param[in]  posargs           positional arguments
+ *                               (accesible through `${[0-9]}`, may be @c NULL)
+ * @param[in]  kvpairs           key-value pairs
+ * @param[out] dest              destination string
+ *
+ * @return status code
+ * @retval TE_ENOENT  An undefined reference without a default value.
+ * @retval TE_EINVAL  Unmatched `${` or an invalid filter.
+ */
+extern te_errno te_string_expand_kvpairs_strict(
+                                    const char *src,
+                                    const char *posargs
+                                    [TE_EXPAND_MAX_POS_ARGS],
+                                    const te_kvpair_h *kvpairs,
+                                    te_string *dest);
+
+/**
  * A function type for getting a value by name from given context.
  *
  * @param name   parameter name
@@ -281,6 +314,7 @@ typedef const char *(*te_param_value_getter)(const char *name, const void *ctx);
  *
  * @return status code
  * @retval TE_EINVAL  Unmatched `${` found
+ * @retval TE_EILSEQ  Unbalanced braces inside a reference
  *
  * @deprecated te_string_expand_parameters() should be used instead.
  */

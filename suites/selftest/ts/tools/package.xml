@@ -164,6 +164,42 @@
                         <value>NEI0QzRENEU0Rg==</value>
                     </arg>
                 </run>
+                <run>
+                    <script name="expand_strict"/>
+                    <arg name="template" list="">
+                        <value>plain text</value>
+                        <value>${var1}</value>
+                        <value>${var1} and ${var2}</value>
+                        <value>${var1|upper}</value>
+                        <value>${unknown:-fallback}</value>
+                        <value>${unknown:+alternative}</value>
+                        <value>${unknown}</value>
+                        <value>prefix ${unknown} suffix</value>
+                        <value>${unknown|upper}</value>
+                    </arg>
+                    <arg name="must_fail" list="">
+                        <value>FALSE</value>
+                        <value>FALSE</value>
+                        <value>FALSE</value>
+                        <value>FALSE</value>
+                        <value>FALSE</value>
+                        <value>FALSE</value>
+                        <value>TRUE</value>
+                        <value>TRUE</value>
+                        <value>TRUE</value>
+                    </arg>
+                    <arg name="expanded" list="">
+                        <value>plain text</value>
+                        <value>value1</value>
+                        <value>value1 and value2</value>
+                        <value>VALUE1</value>
+                        <value>fallback</value>
+                        <value>-</value>
+                        <value>-</value>
+                        <value>-</value>
+                        <value>-</value>
+                    </arg>
+                </run>
 
                 <run>
                     <script name="expand_list"/>
