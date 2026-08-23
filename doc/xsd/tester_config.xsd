@@ -222,6 +222,19 @@
                     </xsd:documentation>
                 </xsd:annotation>
             </xsd:element>
+            <xsd:attribute name="expand" type="xsd:boolean" default="false">
+                <xsd:annotation>
+                    <xsd:documentation>
+                        Enable expansion of variable references in the
+                        content of objective, in the objective attribute
+                        of a value and in the page reference. References
+                        are written as ${name} and resolve to the values
+                        of the arguments and variables of the current
+                        iteration.
+                        Disabled by default.
+                    </xsd:documentation>
+                </xsd:annotation>
+            </xsd:attribute>
         </xsd:choice>
     </xsd:complexType>
 

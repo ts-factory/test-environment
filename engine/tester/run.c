@@ -42,6 +42,8 @@
 #include "tq_string.h"
 #include "te_str.h"
 #include "te_compound.h"
+#include "te_expand.h"
+#include "te_kvpair.h"
 #include "conf_api.h"
 #include "log_bufs.h"
 #include "te_trc.h"
@@ -1279,6 +1281,120 @@ test_params_to_te_string(te_string *str, const unsigned int n_args,
 }
 
 /**
+ * Values of the current iteration prepared for variable expansion.
+ *
+ * The key-value pairs are built on the first demand only, since most
+ * objectives contain no variable references at all.
+ */
+typedef struct expand_args {
+    bool enabled;               /**< Expansion is enabled */
+    bool built;                 /**< Key-value pairs are built */
+    te_kvpair_h kvpairs;        /**< Values of the current iteration */
+    unsigned int n_args;        /**< Number of iteration arguments */
+    const test_iter_arg *args;  /**< Iteration arguments */
+} expand_args;
+
+/** Data to be passed as opaque to expand_args_value_cb(). */
+typedef struct expand_args_data {
+    const test_iter_arg *arg;   /**< Argument being flattened */
+    te_kvpair_h *kvpairs;       /**< Destination */
+} expand_args_data;
+
+/**
+ * Bind a single value of a compound argument.
+ *
+ * The function complies with te_compound_iter_fn prototype.
+ */
+static te_errno
+expand_args_value_cb(char *key, size_t idx, char *value, bool has_more,
+                     void *user)
+{
+    expand_args_data *data = user;
+    te_string name = TE_STRING_INIT;
+
+    te_compound_build_name(&name, data->arg->name, key, idx);
+    te_kvpair_push(data->kvpairs, te_string_value(&name), "%s", value);
+    te_string_free(&name);
+
+    UNUSED(has_more);
+    return 0;
+}
+
+/**
+ * Prepare expansion of variable references for a single iteration.
+ *
+ * @param ea        Expansion context to initialize.
+ * @param enabled   Whether expansion is enabled at all.
+ * @param n_args    Number of iteration arguments.
+ * @param args      Iteration arguments.
+ */
+static void
+expand_args_init(expand_args *ea, bool enabled, unsigned int n_args,
+                 const test_iter_arg *args)
+{
+    ea->enabled = enabled;
+    ea->built = false;
+    ea->n_args = n_args;
+    ea->args = args;
+    te_kvpair_init(&ea->kvpairs);
+}
+
+/**
+ * Append @p src to @p dest expanding variable references in it.
+ *
+ * If expansion is disabled or @p src has no references, @p src is
+ * appended as is.
+ *
+ * @param ea    Expansion context.
+ * @param dest  Destination string.
+ * @param src   Source string (may be @c NULL).
+ */
+static void
+expand_args_append(expand_args *ea, te_string *dest, const char *src)
+{
+    if (src == NULL)
+        return;
+
+    if (!ea->enabled || strstr(src, "${") == NULL)
+    {
+        te_string_append(dest, "%s", src);
+        return;
+    }
+
+    if (!ea->built)
+    {
+        unsigned int i;
+
+        for (i = 0; i < ea->n_args; i++)
+        {
+            te_compound_iterate_str(ea->args[i].value, expand_args_value_cb,
+                                    &(expand_args_data){
+                                        .arg = &ea->args[i],
+                                        .kvpairs = &ea->kvpairs
+                                    });
+        }
+        ea->built = true;
+    }
+
+    if (te_string_expand_kvpairs(src, NULL, &ea->kvpairs, dest) != 0)
+    {
+        ERROR("%s(): failed to expand '%s'", __func__, src);
+        te_string_append(dest, "%s", src);
+    }
+}
+
+/**
+ * Release the expansion context.
+ *
+ * @param ea    Expansion context.
+ */
+static void
+expand_args_free(expand_args *ea)
+{
+    te_kvpair_fini(&ea->kvpairs);
+}
+
+/**
  * Construct iteration objective from objective of the test/session/package
  * and objectives of parameter values.
  *
@@ -1286,11 +1402,13 @@ test_params_to_te_string(te_string *str, const unsigned int n_args,
  * @param objective   The test/session/package objective.
  * @param n_args      Number of test iteration arguments.
  * @param args        Test iteration arguments.
+ * @param ea          Variable expansion context.
  */
 static void
 collect_objectives(te_string *str, const char *objective,
                    const unsigned int n_args,
-                   const test_iter_arg *args)
+                   const test_iter_arg *args,
+                   expand_args *ea)
 {
     unsigned int i;
     const test_iter_arg *p;
@@ -1299,7 +1417,7 @@ collect_objectives(te_string *str, const char *objective,
 
     if (objective != NULL)
     {
-        te_string_append(str, "%s", objective);
+        expand_args_append(ea, str, objective);
     }
     else
     {
@@ -1323,7 +1441,7 @@ collect_objectives(te_string *str, const char *objective,
             if (comma)
                 te_string_append(str, ", ");
 
-            te_string_append(str, "%s", p->objective);
+            expand_args_append(ea, str, p->objective);
             comma = true;
         }
     }
@@ -1802,6 +1920,8 @@ log_test_start(unsigned int flags,
 
     te_string   params_str  = TE_STRING_INIT;
     te_string   obj_str     = TE_STRING_INIT;
+    te_string   page_str    = TE_STRING_INIT;
+    expand_args ea;
     char       *hash_str    = NULL;
 
     const char *objective = NULL;
@@ -1860,6 +1980,9 @@ log_test_start(unsigned int flags,
         return;
     }
 
+    expand_args_init(&ea, (ctx->flags & TESTER_EXPAND_VARS) != 0,
+                     ri->n_args, ctx->args);
+
     param_stems = test_param_names_to_json(ri->n_args, ctx->args,
                                            param_stem_to_json);
     if (param_stems != NULL)
@@ -1892,7 +2015,8 @@ log_test_start(unsigned int flags,
 
             if (page_name != NULL)
             {
-                SET_JSON_STRING(tmp, page_name);
+                expand_args_append(&ea, &page_str, page_name);
+                SET_JSON_STRING(tmp, te_string_value(&page_str));
                 SET_NEW_JSON(result, "page", tmp);
             }
 
@@ -1951,8 +2075,7 @@ log_test_start(unsigned int flags,
             ERROR("Invalid run item type %d", ri->type);
     }
 
-    collect_objectives(&obj_str, objective, ri->n_args,
-                       ctx->args);
+    collect_objectives(&obj_str, objective, ri->n_args, ctx->args, &ea);
     objective = te_string_value(&obj_str);
     if (!te_str_is_null_or_empty(objective))
     {
@@ -1962,6 +2085,8 @@ log_test_start(unsigned int flags,
 
     te_string_free(&params_str);
     te_string_free(&obj_str);
+    te_string_free(&page_str);
+    expand_args_free(&ea);
     tester_control_log(result, "test_start", 1);
     json_decref(result);
 
@@ -2949,6 +3074,8 @@ run_cfg_start(tester_cfg *cfg, unsigned int cfg_id_off, void *opaque)
 
     /* Clone Tester context */
     ctx = tester_run_more_ctx(gctx, false);
+
+    ctx->flags |= (cfg->syntax_flags & TESTER_EXPAND_VARS);
 
     if (cfg->targets != NULL)
     {

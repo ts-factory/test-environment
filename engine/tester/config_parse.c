@@ -727,6 +727,18 @@ get_syntax_flags(xmlNodePtr *node, tester_flags *flags)
     else
         *flags &= ~TESTER_STRIP_INDENT;
 
+    prop_value = false;
+    rc = get_bool_prop(*node, "expand", &prop_value);
+    if (rc != 0 && rc != TE_RC(TE_TESTER, TE_ENOENT))
+    {
+        ERROR("Bad value of 'expand' property");
+        return rc;
+    }
+    if (prop_value)
+        *flags |= TESTER_EXPAND_VARS;
+    else
+        *flags &= ~TESTER_EXPAND_VARS;
+
     *node = xmlNodeNext(*node);
 
     return 0;
@@ -2992,6 +3004,14 @@ get_tester_config(xmlNodePtr root, tester_cfg *cfg,
         ERROR("Failed to get syntax flags");
         return rc;
     }
+
+    /*
+     * Syntax flags are consumed at different times: 'strip_indent' while
+     * parsing this very file, 'expand' much later, when tests are run.
+     * Remember them per configuration file so that the run time does not
+     * depend on the order in which configuration files were parsed.
+     */
+    cfg->syntax_flags = tester_global_context.flags & TESTER_SYNTAX_FLAGS;
 
     /* Get optional information about suites */
     while (node != NULL &&

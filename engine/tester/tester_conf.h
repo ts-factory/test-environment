@@ -317,6 +317,8 @@ typedef struct tester_cfg {
 
     const char         *filename;       /**< Name of the file with
                                              configuration */
+    tester_flags        syntax_flags;   /**< Syntax flags requested by
+                                             this configuration file */
     persons_info        maintainers;    /**< Configuration maintainers */
     char               *descr;          /**< Optional description */
     test_suites_info    suites;         /**< Information about test

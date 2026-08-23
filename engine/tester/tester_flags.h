@@ -124,6 +124,13 @@ typedef uint64_t tester_flags;
 /** Fail test scripts if valgrind detects a memory leak. */
 #define TESTER_FAIL_ON_LEAK           (1LLU << 39)
 
+/** Expand variable references in objectives and page references */
+#define TESTER_EXPAND_VARS            (1LLU << 40)
+
+/** Syntax flags remembered per Tester configuration file */
+#define TESTER_SYNTAX_FLAGS           (TESTER_STRIP_INDENT | \
+                                       TESTER_EXPAND_VARS)
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
