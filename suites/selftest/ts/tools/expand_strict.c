@@ -20,6 +20,9 @@
 /** Logging subsystem entity name */
 #define TE_TEST_NAME    "tools/expand_strict"
 
+/** The name every failing template of the package refers to */
+#define UNDEF_NAME      "unknown"
+
 #include <string.h>
 #include "te_config.h"
 
@@ -37,6 +40,7 @@ main(int argc, char **argv)
     bool must_fail;
     te_kvpair_h kvpairs;
     te_string actual = TE_STRING_INIT;
+    te_string undef_ref = TE_STRING_INIT;
     te_errno expand_rc;
 
     te_kvpair_init(&kvpairs);
@@ -51,7 +55,7 @@ main(int argc, char **argv)
 
     TEST_STEP("Expand the template in strict mode");
     expand_rc = te_string_expand_kvpairs_strict(template, NULL, &kvpairs,
-                                                &actual);
+                                                &actual, &undef_ref);
 
     if (must_fail)
     {
@@ -60,6 +64,17 @@ main(int argc, char **argv)
         {
             ERROR("Expected TE_ENOENT, got %r", expand_rc);
             TEST_VERDICT("Undefined reference was not reported");
+        }
+        /*
+         * Every failing template of the package refers to the same
+         * undefined name, so the expected report is known without
+         * a parameter of its own.
+         */
+        if (strcmp(te_string_value(&undef_ref), UNDEF_NAME) != 0)
+        {
+            ERROR("Expected the undefined reference '%s', got '%s'",
+                  UNDEF_NAME, te_string_value(&undef_ref));
+            TEST_VERDICT("Unexpected undefined reference reported");
         }
     }
     else
@@ -77,6 +92,12 @@ main(int argc, char **argv)
                   te_string_value(&actual));
             TEST_VERDICT("Unexpected expansion");
         }
+        if (undef_ref.len != 0)
+        {
+            ERROR("A reference '%s' was reported undefined",
+                  te_string_value(&undef_ref));
+            TEST_VERDICT("An undefined reference was reported on success");
+        }
     }
 
     TEST_STEP("Check that the non-strict expansion still succeeds");
@@ -89,5 +110,6 @@ cleanup:
 
     te_kvpair_fini(&kvpairs);
     te_string_free(&actual);
+    te_string_free(&undef_ref);
     TEST_END;
 }

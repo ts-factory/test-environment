@@ -262,6 +262,11 @@ extern te_errno te_string_expand_kvpairs(const char *src,
  * the offending reference. `${name:-default}` and `${name:+alt}` keep
  * their ordinary meaning, because there a missing value is intentional.
  *
+ * The offending reference is logged at ERROR only when @p undef_ref
+ * is @c NULL. When the caller passes @p undef_ref, it is expected to
+ * diagnose the reference itself, so the reference is logged at INFO
+ * instead.
+ *
  * @note Strictness applies to top-level references only. References
  *       inside list subscripts and looping constructs are expanded
  *       through te_string_expand_kvpairs() and stay permissive.
@@ -274,6 +279,13 @@ extern te_errno te_string_expand_kvpairs(const char *src,
  *                               (accesible through `${[0-9]}`, may be @c NULL)
  * @param[in]  kvpairs           key-value pairs
  * @param[out] dest              destination string
+ * @param[out] undef_ref         the reference that has been found
+ *                               undefined, as the expander saw it, that
+ *                               is with the filters and the default value
+ *                               stripped (may be @c NULL if the caller is
+ *                               not interested; the string is reset before
+ *                               the name is put into it and is left
+ *                               untouched unless #TE_ENOENT is returned)
  *
  * @return status code
  * @retval TE_ENOENT  An undefined reference without a default value.
@@ -284,7 +296,8 @@ extern te_errno te_string_expand_kvpairs_strict(
                                     const char *posargs
                                     [TE_EXPAND_MAX_POS_ARGS],
                                     const te_kvpair_h *kvpairs,
-                                    te_string *dest);
+                                    te_string *dest,
+                                    te_string *undef_ref);
 
 /**
  * A function type for getting a value by name from given context.

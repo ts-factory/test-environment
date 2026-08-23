@@ -638,6 +638,8 @@ typedef struct expand_run_ctx {
     const void *param_ctx;
     /** Report undefined references instead of ignoring them */
     bool strict;
+    /** Where to put an undefined reference, if the caller wants it */
+    te_string *undef_ref;
     /** Status of the expansion, if it has failed */
     te_errno status;
 } expand_run_ctx;
@@ -745,7 +747,21 @@ process_reference(const char *start, expand_run_ctx *ectx, te_string *dest)
         }
         else if (expand_rc == TE_ENODATA && ectx->strict)
         {
-            ERROR("Undefined reference to '%s'", ref);
+            if (ectx->undef_ref != NULL)
+            {
+                /*
+                 * The caller asked for the reference back, so it is
+                 * expected to diagnose it itself; logging it here as
+                 * well would just be noise.
+                 */
+                INFO("Undefined reference to '%s'", ref);
+                te_string_reset(ectx->undef_ref);
+                te_string_append(ectx->undef_ref, "%s", ref);
+            }
+            else
+            {
+                ERROR("Undefined reference to '%s'", ref);
+            }
             ectx->status = TE_ENOENT;
             return NULL;
         }
@@ -818,13 +834,15 @@ te_string_expand_kvpairs(const char *src,
 te_errno
 te_string_expand_kvpairs_strict(const char *src,
                                 const char *posargs[TE_EXPAND_MAX_POS_ARGS],
-                                const te_kvpair_h *kvpairs, te_string *dest)
+                                const te_kvpair_h *kvpairs, te_string *dest,
+                                te_string *undef_ref)
 {
     kvpairs_expand_ctx kvctx = {.posargs = posargs, .kvpairs = kvpairs};
     expand_run_ctx ectx = {
         .expand_param = expand_kvpairs_value,
         .param_ctx = &kvctx,
         .strict = true,
+        .undef_ref = undef_ref,
         .status = 0,
     };
 

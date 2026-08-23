@@ -7,9 +7,20 @@
 
     <session>
         <arg name="speed"/>
+        <!-- The value is a compound one supplied by the parent run item,
+             so neither its text nor its field names are known here.  The
+             objectives below refer to its fields, plainly and through a
+             list subscript, and the check has to accept both without
+             resolving them. -->
+        <arg name="dev"/>
         <run>
             <script name="helloworld">
-                <objective>Say hello at ${speed}</objective>
+                <objective>Say hello at ${speed} to ${dev_name[0]}</objective>
+            </script>
+        </run>
+        <run>
+            <script name="helloworld">
+                <objective>Say hello to ${dev_pci} at ${speed}</objective>
             </script>
         </run>
     </session>

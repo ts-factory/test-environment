@@ -38,6 +38,7 @@
 #include "te_kvpair.h"
 #include "te_compound.h"
 #include "te_expand.h"
+#include "te_vector.h"
 #include "logger_api.h"
 
 #include "tester_conf.h"
@@ -451,8 +452,12 @@ prepare_cfg_start(tester_cfg *cfg, unsigned int cfg_id_off, void *opaque)
 
     gctx->expand = (cfg->syntax_flags & TESTER_EXPAND_VARS) != 0;
 
-    if (config_prepare_new_ctx(gctx) == NULL)
+    ctx = config_prepare_new_ctx(gctx);
+    if (ctx == NULL)
         return TESTER_CFG_WALK_FAULT;
+
+    /* Run items declared here come from the Tester configuration file */
+    ctx->pkg_path = cfg->filename;
 
     return TESTER_CFG_WALK_CONT;
 }
@@ -601,8 +606,142 @@ typedef struct expand_check_data {
     const test_var_arg *va;         /**< Argument being enumerated */
     te_kvpair_h        *kvpairs;    /**< Names available for expansion */
     const char         *pkg_path;   /**< Package file for diagnostics */
+    te_vec             *open_args;  /**< Names of the arguments whose values
+                                         come from outside the run item, so
+                                         the names they provide cannot be
+                                         enumerated statically
+                                         (vector of @c const @c char @c *) */
     te_errno            rc;         /**< Status of the check */
 } expand_check_data;
+
+/**
+ * Check whether @p name is already known as an unenumerable argument.
+ *
+ * @param data  Validation context.
+ * @param name  Argument name.
+ *
+ * @return @c true if the name is already recorded.
+ */
+static bool
+expand_check_is_open_arg(const expand_check_data *data, const char *name)
+{
+    const char * const *arg;
+
+    TE_VEC_FOREACH(data->open_args, arg)
+    {
+        if (strcmp(*arg, name) == 0)
+            return true;
+    }
+
+    return false;
+}
+
+/**
+ * Check whether an unenumerable argument may provide @p name at run time.
+ *
+ * Such an argument provides its own name and, if its value happens to be
+ * a compound one, the names of its fields, which te_compound_build_name()
+ * builds by joining the name of the argument and the name of the field
+ * with an underscore.
+ *
+ * @note The same function builds @c stem<idx> with no separator at all
+ *       for the second and later values of an unnamed compound, so a
+ *       reference like @c ${dev1} is not accepted here even though
+ *       @c dev might provide it at run time, and the run refuses to
+ *       start.  This is deliberate: accepting a digit suffix would
+ *       swallow real misspellings, and no package needs it.
+ *
+ * @param data  Validation context.
+ * @param name  Name the undefined reference looks up.
+ *
+ * @return @c true if the name may be provided at run time.
+ */
+static bool
+expand_check_may_be_open_ref(const expand_check_data *data, const char *name)
+{
+    const char * const *arg;
+
+    TE_VEC_FOREACH(data->open_args, arg)
+    {
+        size_t len = strlen(*arg);
+
+        if (strncmp(name, *arg, len) == 0 &&
+            (name[len] == '\0' || name[len] == '_'))
+            return true;
+    }
+
+    return false;
+}
+
+/**
+ * Extract the name that an undefined reference looks up.
+ *
+ * A reference may carry a list subscript or a loop body (see te_expand.h),
+ * which the expander strips before looking the name up, so @c ${dev_pci[0]}
+ * has to be answered by binding @c dev_pci and not the reference text.
+ *
+ * @param[in]  ref   Reference reported undefined.
+ * @param[out] name  Name the reference looks up.
+ */
+static void
+expand_check_ref_name(const char *ref, te_string *name)
+{
+    const char *sep = NULL;
+
+    te_string_reset(name);
+    if (te_strpbrk_balanced(ref, '{', '}', '\0', "*[", &sep) != 0 ||
+        sep == NULL)
+        te_string_append(name, "%s", ref);
+    else
+        te_string_append(name, "%.*s", (int)(sep - ref), ref);
+}
+
+/**
+ * Remove a reference from the text being checked.
+ *
+ * The expander reports a reference exactly as it stands in the text, with
+ * the filters and the default value stripped, so @c ${ followed by the
+ * reported text locates the very reference that has failed.  A strict
+ * failure may only happen for a reference that is expanded strictly,
+ * that is a top level one or one inside the body of a @c :- default, so
+ * what is removed is always a whole balanced @c ${...} group and the
+ * rest of the text keeps its meaning: dropping the failing group of
+ * @c ${a:-${b[1]}} leaves @c ${a:-}, which is still valid.
+ *
+ * @note The needle is a prefix, so when the reported name has had a
+ *       filter stripped from it the search may land on a different
+ *       reference that begins with the very same text.  The wrong group
+ *       is then taken out of the copy of the text, which may leave a
+ *       later typo unreported; it can never reject a text that is
+ *       sound, since only what is left of the copy is expanded again.
+ *
+ * @param[in,out] text  Text being checked.
+ * @param[in]     ref   Reference to remove.
+ *
+ * @return @c true if the reference has been found and removed.
+ */
+static bool
+expand_check_drop_ref(te_string *text, const char *ref)
+{
+    te_string needle = TE_STRING_INIT;
+    const char *start;
+    const char *end = NULL;
+    bool removed = false;
+
+    te_string_append(&needle, "${%s", ref);
+    start = strstr(te_string_value(text), te_string_value(&needle));
+    if (start != NULL &&
+        te_strpbrk_balanced(start + 1, '{', '}', '\0', NULL, &end) == 0 &&
+        end != NULL)
+    {
+        te_string_replace_buf(text, start - te_string_value(text),
+                              end - start, NULL, 0);
+        removed = true;
+    }
+    te_string_free(&needle);
+
+    return removed;
+}
 
 /**
  * Bind one value of a compound argument in the validation context.
@@ -637,7 +776,22 @@ expand_check_value_cb(const test_entity_value *value, void *opaque)
     expand_check_data *data = opaque;
 
     if (value->plain != NULL)
+    {
         te_compound_iterate_str(value->plain, expand_check_field_cb, data);
+    }
+    else if (value->ext != NULL)
+    {
+        const char *name = data->va->name;
+
+        /*
+         * The value is supplied by an enclosing run item, which is where
+         * a compound one is split into fields as well.  Neither the text
+         * nor the field names are known until the item is iterated, so
+         * the names this argument provides cannot be enumerated here.
+         */
+        if (!expand_check_is_open_arg(data, name))
+            TE_VEC_APPEND(data->open_args, name);
+    }
 
     return 0;
 }
@@ -669,6 +823,17 @@ expand_check_arg_cb(const test_var_arg *va, void *opaque)
  * never see at run time; such a failure says nothing about the
  * reference itself and must not stop the run.
  *
+ * A reference that an unenumerable argument may provide at run time is
+ * bound in the same way and the string is expanded again, so that the
+ * rest of it is still checked.  A reference whose name is bound already
+ * asks for a shape that only the run time value may have, such as a
+ * value of a list beyond the first one; it is taken out of a copy of the
+ * text instead, so that the rest of the text is still checked.
+ *
+ * The loop makes progress either way: a round either binds a name that
+ * was not bound before or shortens the copy of the text, so it runs at
+ * most as many times as there are references in the text.
+ *
  * @param data  Validation context.
  * @param what  Human readable name of the string being checked.
  * @param src   String to check (may be @c NULL).
@@ -678,25 +843,74 @@ expand_check_string(expand_check_data *data, const char *what,
                     const char *src)
 {
     te_string out = TE_STRING_INIT;
+    te_string undef = TE_STRING_INIT;
+    te_string undef_name = TE_STRING_INIT;
+    te_string text = TE_STRING_INIT;
     te_errno rc;
 
     if (src == NULL || strstr(src, "${") == NULL)
         return;
 
-    rc = te_string_expand_kvpairs_strict(src, NULL, data->kvpairs, &out);
-    if (TE_RC_GET_ERROR(rc) == TE_ENOENT)
+    te_string_append(&text, "%s", src);
+
+    for (;;)
     {
-        ERROR("Cannot expand %s of the run item '%s' in '%s': %r; "
-              "the text is '%s'", what, run_item_name(data->ri),
-              te_str_empty_if_null(data->pkg_path), rc, src);
-        data->rc = TE_RC(TE_TESTER, TE_ENOENT);
+        const char *ref;
+        const char *name;
+
+        te_string_reset(&out);
+        te_string_reset(&undef);
+        rc = te_string_expand_kvpairs_strict(te_string_value(&text), NULL,
+                                             data->kvpairs, &out, &undef);
+        if (TE_RC_GET_ERROR(rc) != TE_ENOENT)
+            break;
+
+        ref = te_string_value(&undef);
+        expand_check_ref_name(ref, &undef_name);
+        name = te_string_value(&undef_name);
+
+        if (!expand_check_may_be_open_ref(data, name))
+        {
+            ERROR("Cannot expand %s of the run item '%s' in '%s': %r; "
+                  "nothing provides '%s' in the text '%s'", what,
+                  run_item_name(data->ri),
+                  te_str_empty_if_null(data->pkg_path), rc, ref, src);
+            data->rc = TE_RC(TE_TESTER, TE_ENOENT);
+            break;
+        }
+
+        if (te_kvpairs_count(data->kvpairs, name) == 0)
+        {
+            te_kvpair_push(data->kvpairs, name, "%s", "");
+            continue;
+        }
+
+        /*
+         * The name is bound already, so binding it once more would not
+         * make the expansion go any further.  Take the reference out of
+         * the copy of the text and carry on with what follows it.
+         */
+        if (!expand_check_drop_ref(&text, ref))
+        {
+            INFO("Stopped checking %s of the run item '%s' in '%s': the "
+                 "reference '%s' is not in the text '%s'", what,
+                 run_item_name(data->ri),
+                 te_str_empty_if_null(data->pkg_path), ref,
+                 te_string_value(&text));
+            break;
+        }
     }
-    else if (rc != 0)
+
+    if (rc != 0 && TE_RC_GET_ERROR(rc) != TE_ENOENT)
     {
         INFO("Cannot check %s of the run item '%s' in '%s': %r; "
              "the text is '%s'", what, run_item_name(data->ri),
              te_str_empty_if_null(data->pkg_path), rc, src);
     }
+
+    te_string_free(&text);
+    te_string_free(&undef_name);
+    te_string_free(&undef);
     te_string_free(&out);
 }
 
@@ -746,27 +960,35 @@ static te_errno
 expand_check_run_item(const run_item *ri, const char *pkg_path)
 {
     te_kvpair_h kvpairs;
+    te_vec open_args = TE_VEC_INIT(const char *);
     expand_check_data data = {
         .ri = ri,
         .va = NULL,
         .kvpairs = &kvpairs,
         .pkg_path = pkg_path,
+        .open_args = &open_args,
         .rc = 0,
     };
 
     te_kvpair_init(&kvpairs);
     (void)test_run_item_enum_args(ri, expand_check_arg_cb, false, &data);
 
-    expand_check_string(&data, "the objective", ri->objective);
-    expand_check_string(&data, "the page reference", ri->page);
-
+    /*
+     * Only the strings that run.c actually expands are checked.  A
+     * reference that an argument coming from outside the run item may
+     * provide is accepted without being resolved: rejecting a reference
+     * that would have been resolved at run time costs the whole run,
+     * while letting a typo through costs a word in a log message.
+     */
     switch (ri->type)
     {
         case RUN_ITEM_SCRIPT:
             expand_check_string(&data, "the objective",
-                                ri->u.script.objective);
+                                ri->objective != NULL ?
+                                ri->objective : ri->u.script.objective);
             expand_check_string(&data, "the page reference",
-                                ri->u.script.page);
+                                ri->page != NULL ?
+                                ri->page : ri->u.script.page);
             break;
 
         case RUN_ITEM_SESSION:
@@ -793,6 +1015,7 @@ expand_check_run_item(const run_item *ri, const char *pkg_path)
     (void)test_run_item_enum_args(ri, expand_check_arg_objectives_cb,
                                   false, &data);
 
+    te_vec_free(&open_args);
     te_kvpair_fini(&kvpairs);
 
     return data.rc;
