@@ -602,6 +602,120 @@ tester_plan_register(tester_plan *plan, json_t *ri, run_item_role role)
 }
 
 /**
+ * Values of the current iteration prepared for variable expansion.
+ *
+ * The key-value pairs are built on the first demand only, since most
+ * objectives contain no variable references at all.
+ */
+typedef struct expand_args {
+    bool enabled;               /**< Expansion is enabled */
+    bool built;                 /**< Key-value pairs are built */
+    te_kvpair_h kvpairs;        /**< Values of the current iteration */
+    unsigned int n_args;        /**< Number of iteration arguments */
+    const test_iter_arg *args;  /**< Iteration arguments */
+} expand_args;
+
+/** Data to be passed as opaque to expand_args_value_cb(). */
+typedef struct expand_args_data {
+    const test_iter_arg *arg;   /**< Argument being flattened */
+    te_kvpair_h *kvpairs;       /**< Destination */
+} expand_args_data;
+
+/**
+ * Bind a single value of a compound argument.
+ *
+ * The function complies with te_compound_iter_fn prototype.
+ */
+static te_errno
+expand_args_value_cb(char *key, size_t idx, char *value, bool has_more,
+                     void *user)
+{
+    expand_args_data *data = user;
+    te_string name = TE_STRING_INIT;
+
+    te_compound_build_name(&name, data->arg->name, key, idx);
+    te_kvpair_push(data->kvpairs, te_string_value(&name), "%s", value);
+    te_string_free(&name);
+
+    UNUSED(has_more);
+    return 0;
+}
+
+/**
+ * Prepare expansion of variable references for a single iteration.
+ *
+ * @param ea        Expansion context to initialize.
+ * @param enabled   Whether expansion is enabled at all.
+ * @param n_args    Number of iteration arguments.
+ * @param args      Iteration arguments.
+ */
+static void
+expand_args_init(expand_args *ea, bool enabled, unsigned int n_args,
+                 const test_iter_arg *args)
+{
+    ea->enabled = enabled;
+    ea->built = false;
+    ea->n_args = n_args;
+    ea->args = args;
+    te_kvpair_init(&ea->kvpairs);
+}
+
+/**
+ * Append @p src to @p dest expanding variable references in it.
+ *
+ * If expansion is disabled or @p src has no references, @p src is
+ * appended as is.
+ *
+ * @param ea    Expansion context.
+ * @param dest  Destination string.
+ * @param src   Source string (may be @c NULL).
+ */
+static void
+expand_args_append(expand_args *ea, te_string *dest, const char *src)
+{
+    if (src == NULL)
+        return;
+
+    if (!ea->enabled || strstr(src, "${") == NULL)
+    {
+        te_string_append(dest, "%s", src);
+        return;
+    }
+
+    if (!ea->built)
+    {
+        unsigned int i;
+
+        for (i = 0; i < ea->n_args; i++)
+        {
+            te_compound_iterate_str(ea->args[i].value, expand_args_value_cb,
+                                    &(expand_args_data){
+                                        .arg = &ea->args[i],
+                                        .kvpairs = &ea->kvpairs
+                                    });
+        }
+        ea->built = true;
+    }
+
+    if (te_string_expand_kvpairs(src, NULL, &ea->kvpairs, dest) != 0)
+    {
+        ERROR("%s(): failed to expand '%s'", __func__, src);
+        te_string_append(dest, "%s", src);
+    }
+}
+
+/**
+ * Release the expansion context.
+ *
+ * @param ea    Expansion context.
+ */
+static void
+expand_args_free(expand_args *ea)
+{
+    te_kvpair_fini(&ea->kvpairs);
+}
+
+/**
  * Add a run item to the execution plan.
  *
  * @param plan      execution plan
@@ -654,12 +768,21 @@ tester_plan_register_run_item(tester_plan *plan, run_item *ri, tester_ctx *ctx)
             }
             break;
         case RUN_ITEM_PACKAGE:
+        {
+            te_string objective = TE_STRING_INIT;
+            expand_args ea;
+
             authors = persons_info_to_json(&ri->u.package->authors);
             if (authors == NULL)
             {
                 ERROR("Failed to transform package authors into JSON");
                 return TE_EFAIL;
             }
+
+            expand_args_init(&ea, (ctx->flags & TESTER_EXPAND_VARS) != 0,
+                             ri->n_args, ctx->args);
+            expand_args_append(&ea, &objective, ri->u.package->objective);
+            expand_args_free(&ea);
 
             /*
              * "*" instead of "?" would be better here, but it's not supported in
@@ -669,8 +792,11 @@ tester_plan_register_run_item(tester_plan *plan, run_item *ri, tester_ctx *ctx)
             obj = json_pack("{s:s, s:s, s:s?, s:o}",
                             "type", "pkg",
                             "name", name,
-                            "objective", ri->u.package->objective,
+                            "objective",
+                            ri->u.package->objective == NULL ?
+                                NULL : te_string_value(&objective),
                             "authors", authors);
+            te_string_free(&objective);
             if (obj == NULL)
             {
                 ERROR("Failed to pack package info into JSON");
@@ -687,6 +813,7 @@ tester_plan_register_run_item(tester_plan *plan, run_item *ri, tester_ctx *ctx)
                 return TE_EFAIL;
             }
             break;
+        }
         default:
             return 0;
     }
@@ -1278,120 +1405,6 @@ test_params_to_te_string(te_string *str, const unsigned int n_args,
     }
 
     VERB("%s(): %s", __FUNCTION__, str->ptr);
-}
-
-/**
- * Values of the current iteration prepared for variable expansion.
- *
- * The key-value pairs are built on the first demand only, since most
- * objectives contain no variable references at all.
- */
-typedef struct expand_args {
-    bool enabled;               /**< Expansion is enabled */
-    bool built;                 /**< Key-value pairs are built */
-    te_kvpair_h kvpairs;        /**< Values of the current iteration */
-    unsigned int n_args;        /**< Number of iteration arguments */
-    const test_iter_arg *args;  /**< Iteration arguments */
-} expand_args;
-
-/** Data to be passed as opaque to expand_args_value_cb(). */
-typedef struct expand_args_data {
-    const test_iter_arg *arg;   /**< Argument being flattened */
-    te_kvpair_h *kvpairs;       /**< Destination */
-} expand_args_data;
-
-/**
- * Bind a single value of a compound argument.
- *
- * The function complies with te_compound_iter_fn prototype.
- */
-static te_errno
-expand_args_value_cb(char *key, size_t idx, char *value, bool has_more,
-                     void *user)
-{
-    expand_args_data *data = user;
-    te_string name = TE_STRING_INIT;
-
-    te_compound_build_name(&name, data->arg->name, key, idx);
-    te_kvpair_push(data->kvpairs, te_string_value(&name), "%s", value);
-    te_string_free(&name);
-
-    UNUSED(has_more);
-    return 0;
-}
-
-/**
- * Prepare expansion of variable references for a single iteration.
- *
- * @param ea        Expansion context to initialize.
- * @param enabled   Whether expansion is enabled at all.
- * @param n_args    Number of iteration arguments.
- * @param args      Iteration arguments.
- */
-static void
-expand_args_init(expand_args *ea, bool enabled, unsigned int n_args,
-                 const test_iter_arg *args)
-{
-    ea->enabled = enabled;
-    ea->built = false;
-    ea->n_args = n_args;
-    ea->args = args;
-    te_kvpair_init(&ea->kvpairs);
-}
-
-/**
- * Append @p src to @p dest expanding variable references in it.
- *
- * If expansion is disabled or @p src has no references, @p src is
- * appended as is.
- *
- * @param ea    Expansion context.
- * @param dest  Destination string.
- * @param src   Source string (may be @c NULL).
- */
-static void
-expand_args_append(expand_args *ea, te_string *dest, const char *src)
-{
-    if (src == NULL)
-        return;
-
-    if (!ea->enabled || strstr(src, "${") == NULL)
-    {
-        te_string_append(dest, "%s", src);
-        return;
-    }
-
-    if (!ea->built)
-    {
-        unsigned int i;
-
-        for (i = 0; i < ea->n_args; i++)
-        {
-            te_compound_iterate_str(ea->args[i].value, expand_args_value_cb,
-                                    &(expand_args_data){
-                                        .arg = &ea->args[i],
-                                        .kvpairs = &ea->kvpairs
-                                    });
-        }
-        ea->built = true;
-    }
-
-    if (te_string_expand_kvpairs(src, NULL, &ea->kvpairs, dest) != 0)
-    {
-        ERROR("%s(): failed to expand '%s'", __func__, src);
-        te_string_append(dest, "%s", src);
-    }
-}
-
-/**
- * Release the expansion context.
- *
- * @param ea    Expansion context.
- */
-static void
-expand_args_free(expand_args *ea)
-{
-    te_kvpair_fini(&ea->kvpairs);
 }
 
 /**
