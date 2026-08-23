@@ -372,6 +372,98 @@ XML schema for :ref:`Tester <doxid-group__te__engine__tester>` configuration fil
 
 
 
+.. _doxid-group__te__engine__tester_1te_engine_tester_objective_expansion:
+
+Variable expansion in objectives
+---------------------------------
+
+By default the objective of a package, a session or a test is logged
+exactly as it is written in the package file. If the Tester
+configuration file enables expansion:
+
+.. ref-code-block:: xml
+
+	<syntax expand="true"/>
+
+then ``${name}`` references in the following places are replaced with
+the values of the arguments and variables of the iteration being
+started:
+
+* the content of ``<objective>`` of a package, a session or a test;
+
+* the ``objective`` attribute of a ``<value>``;
+
+* the page reference of a test.
+
+The page reference is not written in the package file at all: it comes
+from the ``@page`` identifier of the test source, through the
+generated ``tests-info.xml``. It is expanded for completeness, but in
+practice a doxygen page identifier does not normally contain variable
+references.
+
+For example:
+
+.. ref-code-block:: xml
+
+	<run>
+	    <script name="advertise">
+	        <objective>Test that ${speed} link speed is
+	        correctly advertised</objective>
+	    </script>
+	    <arg name="speed">
+	        <value>10G</value>
+	        <value>25G</value>
+	    </arg>
+	</run>
+
+is logged as *Test that 10G link speed is correctly advertised* for
+the first iteration and *Test that 25G link speed is correctly
+advertised* for the second one.
+
+The names that can be referenced are the arguments and the handed-down
+session variables of the run item. A compound value binds one name per
+field, spelled ``argument_field``, exactly as the fields appear among
+the logged parameters. For instance, if a run item is given a compound
+argument ``dev`` with fields ``pci`` and ``name``, its objective may
+refer to ``${dev_pci}`` and ``${dev_name}``.
+
+The full expansion syntax implemented by ``lib/tools/te_expand.h`` is
+available, in particular ``${name:-default}`` and filters such as
+``${name|upper}``.
+
+A reference to a name that no argument or variable of the run item
+can provide is a fatal error: the Tester refuses to start any test.
+For an ordinary objective the check is exact; its limits are:
+
+* An argument declared as ``<arg name="x"/>`` takes its value from
+  the parent run item, so its names are not known in advance.  The
+  references such an argument could supply, ``${x}`` and
+  ``${x_field}``, are accepted unchecked; every other reference is
+  still verified.
+
+* Only top-level references are checked.  A name inside a list
+  subscript or a loop body, such as ``typo`` in
+  ``${dev_pci[${typo}]}``, is not verified in advance; if it is
+  wrong, it is treated as undefined at run time instead.
+
+* A missing value is not an error when the reference says so:
+  write ``${name:-default}`` where absence is intentional.
+
+The diagnostic is logged with ``ERROR()``, not printed to the
+console.  When a run refuses to start, the log (or a run with
+``--log-txt``) has the message naming the package file, the run
+item and the reference that could not be resolved.
+
+Test parameters themselves are never expanded, so expansion cannot
+affect iteration identity, the iteration hash or test history.
+
+.. note::
+
+   ``trc_update`` stores the objective it reads from the log as the
+   objective of the test in the TRC database. With expansion enabled
+   that is the text of the last processed iteration, not the generic
+   wording from the package file.
+
 
 
 

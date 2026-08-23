@@ -347,6 +347,15 @@ run it:
 	    </session>
 	</package>
 
+The ``@objective`` (and ``@page``) shown in the C file above become the
+objective the Tester logs for each iteration of the test, and can in
+turn be overridden by an ``<objective>`` element in ``package.xml``. If
+the Tester configuration file enables it, that objective (and the
+objective of an enclosing session or package, and of an argument
+value) can reference the arguments and variables of the iteration; see
+:ref:`Variable expansion in objectives
+<doxid-group__te__engine__tester_1te_engine_tester_objective_expansion>`.
+
 The next section goes through what each part of the C file is for.
 
 

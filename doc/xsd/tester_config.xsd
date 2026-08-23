@@ -221,7 +221,7 @@
                         Disabled by default.
                     </xsd:documentation>
                 </xsd:annotation>
-            </xsd:element>
+            </xsd:attribute>
             <xsd:attribute name="expand" type="xsd:boolean" default="false">
                 <xsd:annotation>
                     <xsd:documentation>

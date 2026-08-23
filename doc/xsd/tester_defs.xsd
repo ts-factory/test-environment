@@ -145,6 +145,11 @@
             <xsd:annotation>
                 <xsd:documentation>
                     Objective for the value.
+
+                    If &lt;syntax expand="true"/&gt; is set in the
+                    Tester configuration file, ${name} references in
+                    this text are replaced with the values of the
+                    arguments and variables of the current iteration.
                 </xsd:documentation>
             </xsd:annotation>
         </xsd:attribute>
@@ -423,6 +428,12 @@
                 <xsd:annotation>
                     <xsd:documentation>
                         Objective of the test provided by the script.
+
+                        If &lt;syntax expand="true"/&gt; is set in the
+                        Tester configuration file, ${name} references
+                        in this text are replaced with the values of
+                        the arguments and variables of the current
+                        iteration.
                     </xsd:documentation>
                 </xsd:annotation>
             </xsd:element>
@@ -555,6 +566,12 @@
                 <xsd:annotation>
                     <xsd:documentation>
                         Objective of the session.
+
+                        If &lt;syntax expand="true"/&gt; is set in the
+                        Tester configuration file, ${name} references
+                        in this text are replaced with the values of
+                        the arguments and variables of the current
+                        iteration.
                     </xsd:documentation>
                 </xsd:annotation>
             </xsd:element>
@@ -788,6 +805,12 @@
                 <xsd:annotation>
                     <xsd:documentation>
                         Objective of the test package.
+
+                        If &lt;syntax expand="true"/&gt; is set in the
+                        Tester configuration file, ${name} references
+                        in this text are replaced with the values of
+                        the arguments and variables of the current
+                        iteration.
                     </xsd:documentation>
                 </xsd:annotation>
             </xsd:element>
