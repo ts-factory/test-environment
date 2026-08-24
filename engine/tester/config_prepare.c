@@ -609,6 +609,10 @@ typedef struct expand_check_data {
                                          the names they provide cannot be
                                          enumerated statically
                                          (vector of @c const @c char @c *) */
+    bool                scan;       /**< Only look whether there is
+                                         anything to check at all */
+    bool                found;      /**< A reference has been seen while
+                                         scanning */
     te_errno            rc;         /**< Status of the check */
 } expand_check_data;
 
@@ -851,6 +855,9 @@ expand_check_arg_cb(const test_var_arg *va, void *opaque)
  * was not bound before or shortens the copy of the text, so it runs at
  * most as many times as there are references in the text.
  *
+ * While scanning, the string is only looked at, and the first one that
+ * holds a reference at all is enough (see expand_check_run_item()).
+ *
  * @param data  Validation context.
  * @param what  Human readable name of the string being checked.
  * @param src   String to check (may be @c NULL).
@@ -867,6 +874,12 @@ expand_check_string(expand_check_data *data, const char *what,
 
     if (src == NULL || strstr(src, "${") == NULL)
         return;
+
+    if (data->scan)
+    {
+        data->found = true;
+        return;
+    }
 
     te_string_append(&text, "%s", src);
 
@@ -966,7 +979,62 @@ expand_check_arg_objectives_cb(const test_var_arg *va, void *opaque)
 }
 
 /**
+ * Walk every string of a run item that is subject to expansion.
+ *
+ * Only the strings that run.c actually expands are walked, and the very
+ * same set is walked whether the strings are being scanned or checked.
+ *
+ * @param data      Validation context.
+ * @param pkg_path  Package file the run item comes from.
+ */
+static void
+expand_check_strings(expand_check_data *data, const char *pkg_path)
+{
+    const run_item *ri = data->ri;
+
+    switch (ri->type)
+    {
+        case RUN_ITEM_SCRIPT:
+            expand_check_string(data, "the objective",
+                                ri->objective != NULL ?
+                                ri->objective : ri->u.script.objective);
+            expand_check_string(data, "the page reference",
+                                ri->page != NULL ?
+                                ri->page : ri->u.script.page);
+            break;
+
+        case RUN_ITEM_SESSION:
+            expand_check_string(data, "the objective",
+                                ri->u.session.objective);
+            break;
+
+        case RUN_ITEM_PACKAGE:
+            /*
+             * Unlike the strings above, the description of a package is
+             * written in the package file itself, not in the file the
+             * run item comes from.
+             */
+            data->pkg_path = ri->u.package->path;
+            expand_check_string(data, "the objective",
+                                ri->u.package->objective);
+            data->pkg_path = pkg_path;
+            break;
+
+        default:
+            break;
+    }
+
+    (void)test_run_item_enum_args(ri, expand_check_arg_objectives_cb,
+                                  false, data);
+}
+
+/**
  * Check every string of a run item that is subject to expansion.
+ *
+ * A reference that an argument coming from outside the run item may
+ * provide is accepted without being resolved: rejecting a reference
+ * that would have been resolved at run time costs the whole run, while
+ * letting a typo through costs a word in a log message.
  *
  * @param ri        Run item.
  * @param pkg_path  Package file the run item comes from.
@@ -981,56 +1049,31 @@ expand_check_run_item(const run_item *ri, const char *pkg_path)
     expand_check_data data = {
         .ri = ri,
         .va = NULL,
-        .kvpairs = &kvpairs,
+        .kvpairs = NULL,
         .pkg_path = pkg_path,
         .open_args = &open_args,
+        .scan = true,
+        .found = false,
         .rc = 0,
     };
 
+    /*
+     * Building the context binds every value of every argument, which
+     * is a lot of work for a run item whose strings hold no reference
+     * at all, and most of them hold none.  So the strings are looked
+     * through first and the context is built only if there is anything
+     * to resolve.
+     */
+    expand_check_strings(&data, pkg_path);
+    if (!data.found)
+        return 0;
+
+    data.scan = false;
+    data.kvpairs = &kvpairs;
     te_kvpair_init(&kvpairs);
     (void)test_run_item_enum_args(ri, expand_check_arg_cb, false, &data);
 
-    /*
-     * Only the strings that run.c actually expands are checked.  A
-     * reference that an argument coming from outside the run item may
-     * provide is accepted without being resolved: rejecting a reference
-     * that would have been resolved at run time costs the whole run,
-     * while letting a typo through costs a word in a log message.
-     */
-    switch (ri->type)
-    {
-        case RUN_ITEM_SCRIPT:
-            expand_check_string(&data, "the objective",
-                                ri->objective != NULL ?
-                                ri->objective : ri->u.script.objective);
-            expand_check_string(&data, "the page reference",
-                                ri->page != NULL ?
-                                ri->page : ri->u.script.page);
-            break;
-
-        case RUN_ITEM_SESSION:
-            expand_check_string(&data, "the objective",
-                                ri->u.session.objective);
-            break;
-
-        case RUN_ITEM_PACKAGE:
-            /*
-             * Unlike the strings above, the description of a package is
-             * written in the package file itself, not in the file the
-             * run item comes from.
-             */
-            data.pkg_path = ri->u.package->path;
-            expand_check_string(&data, "the objective",
-                                ri->u.package->objective);
-            data.pkg_path = pkg_path;
-            break;
-
-        default:
-            break;
-    }
-
-    (void)test_run_item_enum_args(ri, expand_check_arg_objectives_cb,
-                                  false, &data);
+    expand_check_strings(&data, pkg_path);
 
     te_vec_free(&open_args);
     te_kvpair_fini(&kvpairs);
