@@ -395,6 +395,12 @@ started:
 
 * the page reference of a test.
 
+Expansion belongs to the configuration file that asks for it. It
+applies to the run items declared in that file and to the packages
+they run, and it leaves the run items of the other Tester
+configuration files of the same run alone, whatever the order in which
+the files are given.
+
 The page reference is not written in the package file at all: it comes
 from the ``@page`` identifier of the test source, through the
 generated ``tests-info.xml``. It is expanded for completeness, but in
@@ -425,7 +431,9 @@ session variables of the run item. A compound value binds one name per
 field, spelled ``argument_field``, exactly as the fields appear among
 the logged parameters. For instance, if a run item is given a compound
 argument ``dev`` with fields ``pci`` and ``name``, its objective may
-refer to ``${dev_pci}`` and ``${dev_name}``.
+refer to ``${dev_pci}`` and ``${dev_name}``. A compound value binds no
+name for the argument as a whole, so a bare ``${dev}`` is reported as
+unresolvable instead of quietly expanding to nothing.
 
 The full expansion syntax implemented by ``lib/tools/te_expand.h`` is
 available, in particular ``${name:-default}`` and filters such as
