@@ -712,9 +712,18 @@ get_syntax_flags(xmlNodePtr *node, tester_flags *flags)
     assert(*node != NULL);
     assert(flags != NULL);
 
-    /* 'syntax' block is optional. */
+    /*
+     * 'syntax' block is optional.  A file that has none keeps the
+     * 'strip_indent' of the file parsed before it, which is how it has
+     * always worked and what packages may rely on, but it does not
+     * inherit 'expand': the check the flag switches on is fatal, so a
+     * file must not enable it for a file that says nothing about it.
+     */
     if (xmlStrcmp((*node)->name, CONST_CHAR2XML("syntax")) != 0)
+    {
+        *flags &= ~TESTER_EXPAND_VARS;
         return 0;
+    }
 
     rc = get_bool_prop(*node, "strip_indent", &prop_value);
     if (rc != 0 && rc != TE_RC(TE_TESTER, TE_ENOENT))
@@ -3008,8 +3017,10 @@ get_tester_config(xmlNodePtr root, tester_cfg *cfg,
     /*
      * Syntax flags are consumed at different times: 'strip_indent' while
      * parsing this very file, 'expand' much later, when tests are run.
-     * Remember them per configuration file so that the run time does not
-     * depend on the order in which configuration files were parsed.
+     * Remember them per configuration file, since by the time the tests
+     * are run the global flags hold what the file parsed last has asked
+     * for.  'expand' is reset for a file with no 'syntax' block, so what
+     * is remembered here is what this very file has asked for.
      */
     cfg->syntax_flags = tester_global_context.flags & TESTER_SYNTAX_FLAGS;
 
