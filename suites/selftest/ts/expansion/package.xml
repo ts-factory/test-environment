@@ -2,9 +2,14 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- Copyright (C) 2026 OKTET Labs Ltd. All rights reserved. -->
 <package version="1.0">
-    <description>Objective expansion at ${speed}</description>
+    <description>Objective expansion at ${speed} on ${dev_name}</description>
     <author mailto="te-maint@oktetlabs.ru"/>
 
+    <!-- The description above is checked and expanded against the run
+         item that runs this package, where 'dev' has a compound value.
+         Such a value provides the names of its fields and not the name
+         of the argument, so '${dev_name}' resolves there while a bare
+         '${dev}' would not. -->
     <session>
         <arg name="speed"/>
         <!-- The value is a compound one supplied by the parent run item,

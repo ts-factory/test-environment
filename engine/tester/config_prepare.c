@@ -775,7 +775,24 @@ expand_check_value_cb(const test_entity_value *value, void *opaque)
 
     if (value->plain != NULL)
     {
-        te_compound_iterate_str(value->plain, expand_check_field_cb, data);
+        /*
+         * Exactly the names run.c binds for this value are bound here.
+         * An unnamed item provides the name of the argument itself,
+         * while a named one provides the name of the field only, so a
+         * reference to a named compound as a whole is left undefined
+         * here just as it is left undefined at run time.
+         */
+        if (te_compound_iterate_str(value->plain, expand_check_field_cb,
+                                    data) == TE_ENODATA)
+        {
+            /*
+             * An empty value has no items at all, so run.c binds
+             * nothing and the reference expands to an empty string,
+             * which is what an empty value is meant to give.  Bind the
+             * name here as well, so that the reference is not reported.
+             */
+            te_kvpair_push(data->kvpairs, data->va->name, "%s", "");
+        }
     }
     else if (value->ext != NULL)
     {
@@ -795,7 +812,10 @@ expand_check_value_cb(const test_entity_value *value, void *opaque)
 }
 
 /**
- * Bind the name of an argument and of every field of its values.
+ * Bind the names that the values of an argument provide.
+ *
+ * The name of the argument itself is not bound here: whether it is a
+ * name at all depends on the value, and it is the value that says so.
  *
  * The function complies with test_var_arg_enum_cb prototype.
  */
@@ -805,7 +825,6 @@ expand_check_arg_cb(const test_var_arg *va, void *opaque)
     expand_check_data *data = opaque;
 
     data->va = va;
-    te_kvpair_push(data->kvpairs, va->name, "%s", "");
     (void)test_var_arg_enum_values(data->ri, va, expand_check_value_cb,
                                    data, NULL, NULL);
     data->va = NULL;
