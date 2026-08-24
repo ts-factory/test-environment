@@ -793,13 +793,6 @@
                 root package declared in Tester configuration file.
             </xsd:documentation>
         </xsd:annotation>
-        <xsd:attribute name="name" type="xsd:token">
-            <xsd:annotation>
-                <xsd:documentation>
-                    Name of the (sub)package to run.
-                </xsd:documentation>
-            </xsd:annotation>
-        </xsd:attribute>
         <xsd:choice minOccurs="0" maxOccurs="unbounded">
             <xsd:element name="objective" type="xsd:string">
                 <xsd:annotation>
@@ -815,6 +808,13 @@
                 </xsd:annotation>
             </xsd:element>
         </xsd:choice>
+        <xsd:attribute name="name" type="xsd:token">
+            <xsd:annotation>
+                <xsd:documentation>
+                    Name of the (sub)package to run.
+                </xsd:documentation>
+            </xsd:annotation>
+        </xsd:attribute>
     </xsd:complexType>
 
 <!--
