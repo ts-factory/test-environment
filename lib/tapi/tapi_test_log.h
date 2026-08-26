@@ -24,6 +24,30 @@
 #include "tapi_test_behaviour.h"
 #include "tester_msg.h"
 
+/*
+ * Record a scenario step into the te_scenario ELF section, so that
+ * the full step list of a test can be read from the built binary
+ * and replayed without executing the test (TE_TEST_SCENARIO).
+ *
+ * Only the format string is recorded: it is a string literal by
+ * construction, so it can initialize a static array.  A computed
+ * format string does not compile, which is intended.
+ *
+ * The array is aligned(1) so records pack back to back in the
+ * section, with no inter-object padding for the reader to skip.
+ */
+#ifdef __GNUC__
+#define TE_TEST_STEP_STR_(x_)  #x_
+#define TE_TEST_STEP_STR(x_)   TE_TEST_STEP_STR_(x_)
+#define TE_TEST_STEP_FIRST_(f_, ...)  f_
+#define TE_TEST_STEP_RECORD(_kind, _fs...) \
+    static const char te_scenario_rec_[] \
+        __attribute__((used, aligned(1), section("te_scenario"))) = \
+        _kind "\0" __FILE__ "\0" TE_TEST_STEP_STR(__LINE__) "\0" \
+        TE_TEST_STEP_FIRST_(_fs, "")
+#else
+#define TE_TEST_STEP_RECORD(_kind, _fs...)  do { } while (0)
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,6 +68,7 @@ extern "C" {
  */
 #define TEST_STEP(_fs...) \
     do {                                                            \
+        TE_TEST_STEP_RECORD("STEP", _fs);                           \
         LGR_MESSAGE(TE_LL_CONTROL | TE_LL_RING, TE_USER_STEP, _fs); \
         te_test_fail_state_update(_fs);                             \
         te_test_fail_substate_update(NULL);                         \
@@ -61,9 +86,10 @@ extern "C" {
  */
 #define TEST_SUBSTEP(_fs...) \
     do {                                                                \
+        TE_TEST_STEP_RECORD("SUBSTEP", _fs);                            \
         LGR_MESSAGE(TE_LL_CONTROL | TE_LL_RING, TE_USER_SUBSTEP, _fs);  \
         te_test_fail_substate_update(_fs);                              \
-    } while(0)                                                          \
+    } while (0)
 
 
 /**
@@ -77,7 +103,10 @@ extern "C" {
  * @param _fs - format string and arguments
  */
 #define TEST_STEP_PUSH(_fs...) \
-    LGR_MESSAGE(TE_LL_CONTROL | TE_LL_RING, TE_USER_STEP_PUSH, _fs)
+    do {                                                                 \
+        TE_TEST_STEP_RECORD("PUSH", _fs);                                \
+        LGR_MESSAGE(TE_LL_CONTROL | TE_LL_RING, TE_USER_STEP_PUSH, _fs); \
+    } while (0)
 
 /**
  * Logging of nesting level step pop.
@@ -88,7 +117,10 @@ extern "C" {
  * @param _fs - format string and arguments
  */
 #define TEST_STEP_POP(_fs...) \
-    LGR_MESSAGE(TE_LL_CONTROL | TE_LL_RING, TE_USER_STEP_POP, _fs)
+    do {                                                                \
+        TE_TEST_STEP_RECORD("POP", _fs);                                \
+        LGR_MESSAGE(TE_LL_CONTROL | TE_LL_RING, TE_USER_STEP_POP, _fs); \
+    } while (0)
 
 /**
  * Same as TEST_STEP_PUSH() but uses INFO log level instead of RING.
@@ -99,14 +131,20 @@ extern "C" {
  * @param _fs - format string and arguments
  */
 #define TEST_STEP_PUSH_INFO(_fs...) \
-    LGR_MESSAGE(TE_LL_CONTROL | TE_LL_INFO, TE_USER_STEP_PUSH, _fs)
+    do {                                                                 \
+        TE_TEST_STEP_RECORD("PUSH_INFO", _fs);                           \
+        LGR_MESSAGE(TE_LL_CONTROL | TE_LL_INFO, TE_USER_STEP_PUSH, _fs); \
+    } while (0)
 
 /**
  * Same as TEST_STEP_POP() but uses INFO log level instead of RING.
  * Should be used together with TEST_STEP_PUSH_INFO().
  */
 #define TEST_STEP_POP_INFO(_fs...) \
-    LGR_MESSAGE(TE_LL_CONTROL | TE_LL_INFO, TE_USER_STEP_POP, _fs)
+    do {                                                                \
+        TE_TEST_STEP_RECORD("POP_INFO", _fs);                           \
+        LGR_MESSAGE(TE_LL_CONTROL | TE_LL_INFO, TE_USER_STEP_POP, _fs); \
+    } while (0)
 
 /**
  * Logging of nesting level step next.
@@ -118,7 +156,10 @@ extern "C" {
  * @param _fs - format string and arguments
  */
 #define TEST_STEP_NEXT(_fs...) \
-    LGR_MESSAGE(TE_LL_CONTROL | TE_LL_RING, TE_USER_STEP_NEXT, _fs)
+    do {                                                                 \
+        TE_TEST_STEP_RECORD("NEXT", _fs);                                \
+        LGR_MESSAGE(TE_LL_CONTROL | TE_LL_RING, TE_USER_STEP_NEXT, _fs); \
+    } while (0)
 
 /**
  * Logging of nesting level step reset
@@ -126,6 +167,26 @@ extern "C" {
  * Reset nesting level to 0
  */
 #define TEST_STEP_RESET() \
+    do {                                                                  \
+        TE_TEST_STEP_RECORD("RESET", "");                                 \
+        LGR_MESSAGE(TE_LL_CONTROL | TE_LL_RING, TE_USER_STEP_RESET, ""); \
+    } while (0)
+
+/**
+ * Same as TEST_STEP(), but not recorded in the te_scenario section.
+ *
+ * For the steps the framework logs around every test ("Test start",
+ * "Test cleanup"): they are not part of the test's own scenario.
+ */
+#define TE_TEST_STEP_UNRECORDED(_fs...) \
+    do {                                                            \
+        LGR_MESSAGE(TE_LL_CONTROL | TE_LL_RING, TE_USER_STEP, _fs); \
+        te_test_fail_state_update(_fs);                             \
+        te_test_fail_substate_update(NULL);                         \
+    } while (0)
+
+/** Same as TEST_STEP_RESET(), but not recorded (see above). */
+#define TE_TEST_STEP_RESET_UNRECORDED() \
     LGR_MESSAGE(TE_LL_CONTROL | TE_LL_RING, TE_USER_STEP_RESET, "")
 
 /**@}*/

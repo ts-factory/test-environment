@@ -128,7 +128,7 @@ extern "C" {
                    "Press any key to continue...\n");                \
             getchar();                                               \
         }                                                            \
-        TEST_STEP("Test cleanup");                                   \
+        TE_TEST_STEP_UNRECORDED("Test cleanup");                     \
         goto cleanup;                                                \
     } while (0)
 
@@ -200,7 +200,7 @@ extern "C" {
     te_test_id = test_get_test_id(argc, argv);                      \
     if (te_test_id == TE_LOG_ID_UNDEFINED)                          \
         return EXIT_FAILURE;                                        \
-    TEST_STEP("Test start");                                        \
+    TE_TEST_STEP_UNRECORDED("Test start");                          \
     /*                                                              \
      * Set jump point to cleanup_specific label to handle           \
      * if TEST_START_SPECIFIC fail                                  \
@@ -228,7 +228,7 @@ extern "C" {
     /* Resetup jump point to cleanup label */                       \
     TAPI_JMP_POP;                                                   \
     TAPI_ON_JMP(TEST_ON_JMP_DO);                                    \
-    TEST_STEP_RESET()
+    TE_TEST_STEP_RESET_UNRECORDED()
 
 /**
  * The last action of the test @b main() function.
