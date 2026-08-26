@@ -178,3 +178,43 @@ The filesystem is the status: a test whose ``.c`` exists is
 implemented, one without is pending. The markdown carries no
 checkboxes or done-lists, and nothing needs updating when a test
 is implemented - the drift check takes over from there.
+
+The scenario of a built test
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Every ``TEST_STEP`` family macro also records its format string,
+kind and source position into a ``te_scenario`` ELF section of the
+test binary, so the step list of a built test is available without
+running it and without its sources. Steps the framework logs
+around every test, such as ``Test start`` and ``Test cleanup``,
+are not recorded: the section holds the test's own scenario only.
+
+.. code-block:: shell
+
+    ${TE_BASE}/scripts/scenario/scenario.py steps ts/usecases/set_mtu
+
+A test can also replay that scenario itself. When the
+``TE_TEST_SCENARIO`` environment variable is set, a test logs every
+recorded step through the normal logging path and exits
+successfully without touching agents, RPC or the configurator. An
+ordinary dispatcher run with the variable set therefore produces a
+genuine log in which every iteration holds its scenario and
+nothing else - suitable for the regular log processing tools and
+importable like any other run:
+
+.. code-block:: shell
+
+    TE_TEST_SCENARIO=steps  ./run.sh --cfg=<testbed> ...
+    TE_TEST_SCENARIO=params ./run.sh --cfg=<testbed> ...
+
+``steps`` keeps ``@p name`` references as written; ``params``
+substitutes them with the values of the iteration being logged.
+Arguments of the C format specifiers are computed by the code that
+replay skips, so they stay unexpanded.
+
+The recording is the static step list of the binary: a step inside
+a condition or a loop is recorded once and replayed once, whatever
+the iteration would really do, and steps in helper functions appear
+where they are defined, not where they are called. A scenario that
+must be exact per iteration needs the test to hoist such conditions
+into the step text, which is already the convention in the suites.
