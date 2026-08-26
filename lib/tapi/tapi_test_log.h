@@ -192,6 +192,23 @@ extern "C" {
 /**@}*/
 
 /**
+ * Replay the scenario recorded in the te_scenario section.
+ *
+ * When the TE_TEST_SCENARIO environment variable is set, log every
+ * recorded step exactly as the original macro would (value "params"
+ * additionally substitutes @p references from the name=value pairs
+ * of @p argv) and report that the caller must exit successfully
+ * without running the test.
+ *
+ * @param argc  Argument count as passed to the test.
+ * @param argv  Arguments as passed to the test (name=value pairs).
+ *
+ * @return @c true iff the scenario was replayed and the test must
+ *         exit now with EXIT_SUCCESS.
+ */
+extern bool tapi_test_scenario_replay(int argc, char **argv);
+
+/**
  * Terminate a test with success status.
  * @ingroup te_ts_tapi_test
  */

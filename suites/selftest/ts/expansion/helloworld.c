@@ -34,6 +34,8 @@ main(int argc, char **argv)
     TEST_STEP("Print \"Hello, World!\"");
     RING("Hello, World!");
 
+    TEST_STEP("Greet at @p speed");
+
     TEST_SUCCESS;
 
 cleanup:

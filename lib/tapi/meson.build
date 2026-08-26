@@ -129,6 +129,7 @@ sources += files(
     'tapi_sniffer.c',
     'tapi_tags.c',
     'tapi_test_behaviour.c',
+    'tapi_test_scenario.c',
     'tapi_test_run_status.c',
     'test_params.c',
     'tapi_tester_msg.c',

@@ -200,6 +200,9 @@ extern "C" {
     te_test_id = test_get_test_id(argc, argv);                      \
     if (te_test_id == TE_LOG_ID_UNDEFINED)                          \
         return EXIT_FAILURE;                                        \
+    /* Scenario replay mode: log the steps and run nothing */       \
+    if (tapi_test_scenario_replay(argc, argv))                      \
+        return EXIT_SUCCESS;                                        \
     TE_TEST_STEP_UNRECORDED("Test start");                          \
     /*                                                              \
      * Set jump point to cleanup_specific label to handle           \
