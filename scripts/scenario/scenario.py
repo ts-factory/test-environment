@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from cstep import compare
+from elfsteps import read_scenario
 from emit_c import emit_test
 from mdparse import parse_package
 from model import Package, ScenarioError
@@ -150,6 +151,17 @@ def _cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_steps(args: argparse.Namespace) -> int:
+    try:
+        records = read_scenario(Path(args.binary))
+    except (OSError, ValueError) as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    for r in records:
+        print(f'{r.kind}\t{r.text}')
+    return 0
+
+
 def _add_root_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         '-t',
@@ -191,6 +203,10 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument('--pending', action='store_true', help='only unimplemented')
     g.add_argument('--implemented', action='store_true', help='only implemented')
     p.set_defaults(func=_cmd_list)
+
+    p = sub.add_parser('steps', help='list steps recorded in a binary')
+    p.add_argument('binary', help='path to a built test executable')
+    p.set_defaults(func=_cmd_steps)
 
     args = parser.parse_args(argv)
     try:
