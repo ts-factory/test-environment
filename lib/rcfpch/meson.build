@@ -25,6 +25,7 @@ headers += files(
     'rcf_ch_api.h',
     'rcf_pch.h',
     'rcf_pch_ta_cfg.h',
+    'rcf_pch_tree.h',
 )
 sources += files(
     'rcf_pch.c',
