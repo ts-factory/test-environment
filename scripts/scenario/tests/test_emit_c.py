@@ -16,11 +16,6 @@ GOLDEN = """\
  *
  * @objective Make sure that MTU-sized packets pass and larger do not.
  *
- * @param mtu          MTU on IUT
- * @param ethdev_state The state of the device:
- *                     - @c TEST_ETHDEV_CONFIGURED (configured, not started)
- *                     - @c TEST_ETHDEV_STARTED
- *
  * @type use case
  *
  * @author John Doe <John.Doe@oktet.co.il>
@@ -40,7 +35,12 @@ main(int argc, char *argv[])
     const char *ethdev_state;
 
     TEST_START;
+    TEST_PARAM_DOC(mtu, "MTU on IUT");
     TEST_GET_UINT_PARAM(mtu);
+    TEST_PARAM_DOC(ethdev_state,
+                   "The state of the device:",
+                   "- @c TEST_ETHDEV_CONFIGURED (configured, not started)",
+                   "- @c TEST_ETHDEV_STARTED");
     /* enum: consider TEST_GET_ENUM_PARAM */
     TEST_GET_STRING_PARAM(ethdev_state);
 
@@ -154,6 +154,57 @@ def test_long_step_wraps() -> None:
     ) in out
     for line in out.splitlines():
         assert len(line) <= 80
+
+
+def test_long_param_doc_wraps() -> None:
+    from model import Param
+
+    pkg, test = make_test()
+    test.params = [
+        Param(
+            name='mode',
+            description=(
+                'A very long parameter description that certainly cannot '
+                'fit into one eighty column line of generated C source.'
+            ),
+        )
+    ]
+    test.steps = []
+    out = emit_test(
+        pkg,
+        test,
+        author='A <a@b.c>',
+        copyright_line='Copyright (C) 2026 OKTET Ltd.',
+    )
+    assert 'TEST_PARAM_DOC(mode,' in out
+    for line in out.splitlines():
+        assert len(line) <= 80
+
+
+def test_param_doc_special_chars_escaped() -> None:
+    pkg, test = make_test()
+    test.params = [Param(name='mode', description='Run \\--show "fast" mode')]
+    test.steps = []
+    out = emit_test(
+        pkg,
+        test,
+        author='A <a@b.c>',
+        copyright_line='Copyright (C) 2026 OKTET Ltd.',
+    )
+    assert 'TEST_PARAM_DOC(mode, "Run \\\\--show \\"fast\\" mode");' in out
+
+
+def test_param_doc_empty_description() -> None:
+    pkg, test = make_test()
+    test.params = [Param(name='mode', description='')]
+    test.steps = []
+    out = emit_test(
+        pkg,
+        test,
+        author='A <a@b.c>',
+        copyright_line='Copyright (C) 2026 OKTET Ltd.',
+    )
+    assert 'TEST_PARAM_DOC(mode, "");' in out
 
 
 def test_special_chars_escaped() -> None:
