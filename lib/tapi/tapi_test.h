@@ -536,6 +536,30 @@ cleanup_specific:                                                   \
     (test_find_param(argc, argv, #var_name_) != NULL)
 
 /**
+ * Document a test parameter in place.
+ *
+ * Expands to nothing at run time: the scenario tooling reads the
+ * string arguments from the source and the documentation build
+ * turns them into the parameter description of the test page.
+ * Each argument after the name is one line of the description;
+ * adjacent string literals within one argument continue the same
+ * line. Markdown bullets document the possible values:
+ *
+ * @code
+ * TEST_PARAM_DOC(mode,
+ *     "Operation mode:",
+ *     "- fast: skip checks",
+ *     "- safe: full validation");
+ * TEST_GET_ENUM_PARAM(mode, MODE_MAPPING_LIST);
+ * @endcode
+ *
+ * @param var_name_  Variable whose name is the same as the name of
+ *                   the parameter being documented
+ * @param ...        Description lines (string literals)
+ */
+#define TEST_PARAM_DOC(var_name_, ...) do { } while (0)
+
+/**
  * Generic way to return mapped value of a parameter: string -> enum
  *
  * @param var_name_  Variable whose name is the same as the name of
