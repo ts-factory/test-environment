@@ -166,6 +166,11 @@ when that subdirectory exists, as in DPDK suites):
     # What is described but not yet implemented
     ${TE_BASE}/scripts/scenario/scenario.py list --pending
 
+Parameter descriptions from the ``Parameters:`` list are emitted
+as ``TEST_PARAM_DOC()`` lines in front of the corresponding
+getters, not as header ``@param`` entries; the doxygen filter
+regenerates the ``@param`` block from the source.
+
 The check compares the step texts, their order and their nesting
 against the markdown; comments are never compared. A ``.c`` file
 not described in any markdown is reported only with ``--strict``,
