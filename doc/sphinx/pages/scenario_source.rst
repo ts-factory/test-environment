@@ -150,3 +150,35 @@ The filter needs ``python3`` with the ``libclang`` package on
 ``PATH`` at documentation build time; without them it falls back
 to ``c2dox`` with a warning on stderr, so the build still
 produces pages, just flat ones.
+
+Inline parameter documentation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Test parameters are documented next to the code that reads them
+with ``TEST_PARAM_DOC()``. The macro expands to nothing; each
+argument after the parameter name is one line of the description,
+so a value list needs no ``\n`` escapes, and adjacent string
+literals within one argument continue the same line:
+
+.. code-block:: c
+
+    TEST_PARAM_DOC(mode,
+        "Operation mode:",
+        "- fast: skip checks",
+        "- safe: full validation");
+    TEST_GET_ENUM_PARAM(mode, MODE_MAPPING_LIST);
+
+The doxygen filter turns these strings into the ``@param`` entries
+of the test page. When the header comment still carries a
+hand-written ``@param`` of the same name, the inline text wins;
+header-only entries survive in front of the generated ones. The
+end state of a migrated test has no ``@param`` in the header at
+all.
+
+``scenario.py check`` enforces coverage: a parameter read with no
+documentation, a doc without a matching read, a duplicated doc,
+and description drift against the ``package.md`` parameter list
+are findings. By default a header ``@param`` still counts as
+documentation; ``--strict`` requires the inline form. The ``env``
+parameter is the one exception to staleness checking, because its
+read is hidden inside ``TEST_START``.
