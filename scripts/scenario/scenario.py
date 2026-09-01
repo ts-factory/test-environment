@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 
 import aststeps
 import condeval
+import cparam
 import emit_md
 from cstep import compare
 from emit_c import emit_test
@@ -107,8 +108,13 @@ def _check_package(root: Path, md: Path, *, strict: bool) -> list[str]:
     ref = _pkg_ref(root, md)
     for t in pkg.tests:
         c_path = md.parent / f'{t.name}.c'
-        if c_path.exists():
-            findings.extend(compare(t, c_path.read_text(encoding='utf-8'), f'{ref}/{t.name}'))
+        if not c_path.exists():
+            continue
+        c_name = f'{ref}/{t.name}'
+        c_text = c_path.read_text(encoding='utf-8')
+        findings.extend(compare(t, c_text, c_name))
+        findings.extend(cparam.check_docs(c_text, c_name, strict=strict))
+        findings.extend(cparam.doc_drift(t, c_text, c_name))
     if strict:
         known = {t.name for t in pkg.tests}
         findings.extend(
@@ -447,7 +453,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         '--strict',
         action='store_true',
-        help='also report .c files not described in markdown',
+        help='also report .c files not described in markdown and'
+        ' require TEST_PARAM_DOC for every read parameter'
+        ' (a header @param does not count)',
     )
     p.set_defaults(func=_cmd_check)
 

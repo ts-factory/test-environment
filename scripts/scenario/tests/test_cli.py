@@ -25,6 +25,46 @@ Steps:
 """
 
 
+PKG_PARAMS = """\
+# usecases: Basic
+
+## two: Second test
+
+Objective two.
+
+Parameters:
+
+- `mode`: Operation mode
+    - `fast`: skip checks
+    - `safe`: full validation
+
+Steps:
+
+1. Do the thing.
+"""
+
+C_TWO = """\
+/** @defgroup usecases-two Second test
+ * @objective Objective two.
+ *
+ * @par Scenario:
+ */
+int
+main(void)
+{
+    const char *mode;
+
+    TEST_PARAM_DOC(mode,
+        "Operation mode:",
+        "- @c fast (skip checks)",
+        "- @c safe (full validation)");
+    TEST_GET_STRING_PARAM(mode);
+    TEST_STEP("Do the thing.");
+    return 0;
+}
+"""
+
+
 def make_suite(tmp_path: Path) -> Path:
     root = tmp_path / 'ts'
     (root / 'usecases').mkdir(parents=True)
@@ -104,6 +144,23 @@ def test_check_strict_uncovered(tmp_path: Path, capsys: pytest.CaptureFixture[st
     assert main(['check', '-t', str(suite)]) == 0
     assert main(['check', '--strict', '-t', str(suite)]) == 1
     assert 'stray.c' in capsys.readouterr().out
+
+
+def test_check_param_docs(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = tmp_path / 'ts'
+    (root / 'usecases').mkdir(parents=True)
+    (root / 'usecases' / 'package.md').write_text(textwrap.dedent(PKG_PARAMS), encoding='utf-8')
+    c = root / 'usecases' / 'two.c'
+    c.write_text(textwrap.dedent(C_TWO), encoding='utf-8')
+    assert main(['check', '-t', str(tmp_path)]) == 0
+
+    undocumented = textwrap.dedent(C_TWO).replace(
+        'TEST_GET_STRING_PARAM(mode);',
+        'TEST_GET_STRING_PARAM(mode);\n    TEST_GET_INT_PARAM(other);',
+    )
+    c.write_text(undocumented, encoding='utf-8')
+    assert main(['check', '-t', str(tmp_path)]) == 1
+    assert 'parameter other is undocumented' in capsys.readouterr().out
 
 
 def test_unknown_test(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
