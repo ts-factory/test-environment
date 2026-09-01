@@ -9,7 +9,7 @@ import pytest
 
 import aststeps
 from aststeps import Cond
-from doxfilter import filter_text, render_dox
+from doxfilter import filter_text, merge_params, render_dox
 from steptree import Node
 
 HEADER_SRC = """\
@@ -145,3 +145,139 @@ def test_filter_text_no_steps(tmp_path: Path) -> None:
     assert '/** @defgroup demo-check Demo check' in lines
     assert not any(line.lstrip().startswith(('-#', '- ')) for line in lines)
     assert lines[-1] == '/** @} */'
+
+
+PARAM_MERGE_SRC = """\
+/* SPDX-License-Identifier: Apache-2.0 */
+
+/** @defgroup demo-doc Demo doc
+ * @ingroup demo
+ * @{
+ *
+ * @objective Check params
+ *
+ * @param env   Testing environment:
+ *              - @ref env-peer2peer
+ * @param mode  Stale header text
+ *
+ * @par Scenario:
+ */
+
+int
+main(void)
+{
+    int mode;
+
+    TEST_PARAM_DOC(mode,
+        "Operation mode:",
+        "- fast: skip checks",
+        "- safe: full validation");
+    TEST_GET_INT_PARAM(mode);
+    TEST_STEP("Run");
+    return 0;
+}
+"""
+
+
+@pytest.mark.skipif(not aststeps.HAVE_CLANG, reason='libclang not installed')
+def test_filter_merges_param_docs(tmp_path: Path) -> None:
+    src = tmp_path / 'demo.c'
+    src.write_text(textwrap.dedent(PARAM_MERGE_SRC), encoding='utf-8')
+    lines = filter_text(src).splitlines()
+    assert ' * @param env   Testing environment:' in lines
+    assert ' * @param mode Operation mode:' in lines
+    cont = ' * ' + ' ' * len('@param mode ')
+    assert f'{cont}- fast: skip checks' in lines
+    assert f'{cont}- safe: full validation' in lines
+    assert not any('Stale header text' in line for line in lines)
+    env_at = lines.index(' * @param env   Testing environment:')
+    mode_at = lines.index(' * @param mode Operation mode:')
+    assert env_at < mode_at < lines.index(' * @par Scenario:')
+
+
+@pytest.mark.skipif(not aststeps.HAVE_CLANG, reason='libclang not installed')
+def test_filter_warns_undocumented(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    src = tmp_path / 'demo.c'
+    plain = """\
+/** @defgroup demo-w Demo warn
+ * @objective Check
+ *
+ * @par Scenario:
+ */
+int
+main(void)
+{
+    int size;
+
+    TEST_GET_INT_PARAM(size);
+    TEST_STEP("Run");
+    return 0;
+}
+"""
+    src.write_text(textwrap.dedent(plain), encoding='utf-8')
+    filter_text(src)
+    assert 'parameter size is undocumented' in capsys.readouterr().err
+
+
+def test_merge_params_keeps_content_between_spans() -> None:
+    header = [
+        '/** @defgroup x-y Title',
+        ' * @objective Check',
+        ' *',
+        ' * @param mode  Old mode text',
+        ' *',
+        ' * @note Keep this caveat',
+        ' *       across merges',
+        ' *',
+        ' * @param size  The size',
+        ' *',
+        ' * @par Scenario:',
+    ]
+    docs = [aststeps.ParamDoc(name='mode', text='New mode text', line=1)]
+    out = merge_params(header, docs)
+    # The @note block sits between the two @param blocks in the
+    # source; it must not be dropped even though both @param spans
+    # around it collapse into one merged block elsewhere.
+    assert ' * @note Keep this caveat' in out
+    assert ' *       across merges' in out
+    # The overridden @param is gone, its stale text with it; the
+    # untouched one survives verbatim.
+    assert not any('Old mode text' in line for line in out)
+    assert ' * @param size  The size' in out
+    assert ' * @param mode New mode text' in out
+
+
+def test_merge_params_no_header_params_before_scenario() -> None:
+    header = [
+        '/** @defgroup x-y Title',
+        ' * @objective Check',
+        ' *',
+        ' * @par Scenario:',
+    ]
+    docs = [aststeps.ParamDoc(name='mode', text='Info', line=1)]
+    out = merge_params(header, docs)
+    assert out == [
+        '/** @defgroup x-y Title',
+        ' * @objective Check',
+        ' *',
+        ' * @param mode Info',
+        ' *',
+        ' * @par Scenario:',
+    ]
+
+
+def test_merge_params_no_header_params_no_marker() -> None:
+    header = [
+        '/** @defgroup x-y Title',
+        ' * @objective Check',
+    ]
+    docs = [aststeps.ParamDoc(name='mode', text='Info', line=1)]
+    out = merge_params(header, docs)
+    assert out == [
+        '/** @defgroup x-y Title',
+        ' * @objective Check',
+        ' *',
+        ' * @param mode Info',
+    ]

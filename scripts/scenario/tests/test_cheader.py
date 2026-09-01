@@ -2,7 +2,7 @@
 # Copyright (C) 2026 OKTET Ltd.
 """Tests for the doxygen header comment surgery."""
 
-from cheader import parse_doc_header, split_source
+from cheader import param_spans, parse_doc_header, split_source
 
 HEADER_SRC = """\
 /* SPDX-License-Identifier: Apache-2.0 */
@@ -120,3 +120,22 @@ def test_parse_doc_header_page_style() -> None:
     assert objective == 'Testing strict expansion.'
     assert type_ is None
     assert params == []
+
+
+def test_param_spans() -> None:
+    header = [
+        '/** @defgroup x-y Title',
+        ' * @objective Check',
+        ' *',
+        ' * @param mode  The mode:',
+        ' *              - a',
+        ' *              - b',
+        ' * @param size  The size',
+        ' *',
+        ' * @par Scenario:',
+    ]
+    assert param_spans(header) == [('mode', 3, 6), ('size', 6, 7)]
+
+
+def test_param_spans_none() -> None:
+    assert param_spans(['/** @defgroup x-y T', ' * @objective O']) == []
