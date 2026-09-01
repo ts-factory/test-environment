@@ -117,6 +117,31 @@ def resolve_inline(
     return _CODE_SPAN.sub(sub, text)
 
 
+def param_doc_lines(
+    p: Param,
+    params: Collection[str],
+    values: Collection[str],
+) -> list[str]:
+    """The canonical doc lines of a parameter, description first.
+
+    The single source for what a parameter's documentation looks
+    like in C: the emitter writes these lines into TEST_PARAM_DOC
+    arguments and the drift check compares against them.  With
+    values the description gets a trailing colon and one
+    '- @c value (comment)' bullet per value.
+    """
+    desc = resolve_inline(p.description, params, values)
+    if p.values:
+        desc = desc.rstrip('.:') + ':'
+    lines = [desc]
+    for v in p.values:
+        text = f'- @c {v.name}'
+        if v.comment:
+            text += f' ({v.comment})'
+        lines.append(text)
+    return lines
+
+
 def flatten_steps(
     steps: list[Step],
     depth: int = 1,
