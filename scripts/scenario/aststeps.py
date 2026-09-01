@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
+from cstep import DOC_ESCAPES, unescape
+
 try:
     from clang import cindex
 
@@ -43,6 +45,10 @@ _MACROS = {
 # parse a test without the TE headers (doxygen filter, probes).
 STEP_MACROS = tuple(_MACROS)
 
+# The inline parameter documentation macro; tools stub it the same
+# way as the step macros to see its uses without the TE headers.
+PARAM_DOC_MACRO = 'TEST_PARAM_DOC'
+
 # TEST_GET_* accessors: the C variable name equals the test
 # parameter name, which is what lets package.xml values bind to
 # condition identifiers.
@@ -60,6 +66,9 @@ _PARAM_MACROS = {
     'TEST_GET_BOOL_PARAM': 'bool',
     'TEST_GET_ENUM_PARAM': 'enum',
 }
+
+# Public view of the accessor names, for tools that stub them.
+PARAM_MACROS = tuple(_PARAM_MACROS)
 
 _BOOL_MAPPING = {'TRUE': 1, 'FALSE': 0}
 
@@ -140,12 +149,30 @@ class Binding:
 
 
 @dataclass
+class ParamDoc:
+    """One TEST_PARAM_DOC use.
+
+    Attributes:
+        name: The documented parameter name.
+        text: The description, one line per macro argument after
+            the name; adjacent literals within an argument join
+            without a break.
+        line: Line of the use in the source file.
+    """
+
+    name: str
+    text: str
+    line: int
+
+
+@dataclass
 class SourceInfo:
     """Everything the analysis reads out of one test source.
 
     Attributes:
         steps: The steps in source order.
         bindings: Parameter bindings keyed by parameter name.
+        param_docs: TEST_PARAM_DOC uses, in source order.
         enums: Enum constant values seen by the parse, any file.
         macros: Object-like integer macro values, any file.
         macro_tokens: Raw definition tokens of object-like macros,
@@ -154,6 +181,7 @@ class SourceInfo:
 
     steps: list[SourceStep]
     bindings: dict[str, Binding]
+    param_docs: list[ParamDoc]
     enums: dict[str, int]
     macros: dict[str, int]
     macro_tokens: dict[str, list[str]]
@@ -701,6 +729,65 @@ def _param_binding(cursor: object, line: int) -> Binding | None:
     return binding
 
 
+def _param_doc_arg_tokens(cursor: object) -> list[list[object]]:
+    """Tokens of each top-level argument of a macro use.
+
+    Args:
+        cursor: A macro instantiation cursor.
+
+    Returns:
+        One token list per comma-separated argument inside the
+        parentheses; empty for a use without them.
+    """
+    args: list[list[object]] = [[]]
+    depth = 0
+    # Skip the macro name itself (the first token), matching
+    # _macro_args(): otherwise it is misread as an argument token.
+    for tok in list(cursor.get_tokens())[1:]:  # type: ignore[attr-defined]
+        sp = tok.spelling
+        if sp == '(':
+            depth += 1
+            if depth == 1:
+                continue
+        elif sp == ')':
+            depth -= 1
+            if depth == 0:
+                break
+        if sp == ',' and depth == 1:
+            args.append([])
+            continue
+        args[-1].append(tok)
+    return args if args != [[]] else []
+
+
+def _param_doc(cursor: object, line: int) -> ParamDoc | None:
+    """A ParamDoc for a TEST_PARAM_DOC use, or None if malformed.
+
+    The first argument is the parameter name; every following
+    top-level argument is one line of the description, its adjacent
+    string literals concatenated and escapes decoded (an escaped
+    newline is a real line break here).
+    """
+    args = _param_doc_arg_tokens(cursor)
+    if len(args) < 2:  # noqa: PLR2004 - name plus at least one description line
+        return None
+    name = next(
+        (t.spelling for t in args[0] if t.kind == cindex.TokenKind.IDENTIFIER),  # type: ignore[attr-defined]
+        '',
+    )
+    if not name:
+        return None
+    lines = [
+        ''.join(
+            unescape(t.spelling[1:-1], DOC_ESCAPES)  # type: ignore[attr-defined]
+            for t in arg
+            if t.kind == cindex.TokenKind.LITERAL and t.spelling.startswith('"')  # type: ignore[attr-defined]
+        )
+        for arg in args[1:]
+    ]
+    return ParamDoc(name=name, text='\n'.join(lines), line=line)
+
+
 def _walk(  # type: ignore[no-any-unimported]
     tu: cindex.TranslationUnit,
     funcs: list[tuple[object, tuple[int, int, int, int], list]],
@@ -719,6 +806,7 @@ def _walk(  # type: ignore[no-any-unimported]
     """
     steps = []
     bindings: dict[str, Binding] = {}
+    param_docs: list[ParamDoc] = []
     enums: dict[str, int] = {}
     macros: dict[str, int] = {}
     macro_tokens: dict[str, list[str]] = {}
@@ -729,6 +817,11 @@ def _walk(  # type: ignore[no-any-unimported]
             continue
         loc = cursor.location
         if loc.file is None or not loc.file.name.endswith(source.name):
+            continue
+        if cursor.spelling == PARAM_DOC_MACRO:
+            doc = _param_doc(cursor, loc.line)
+            if doc is not None:
+                param_docs.append(doc)
             continue
         kind = _MACROS.get(cursor.spelling)
         if kind is None:
@@ -747,9 +840,11 @@ def _walk(  # type: ignore[no-any-unimported]
             )
         )
     steps.sort(key=lambda s: s.line)
+    param_docs.sort(key=lambda d: d.line)
     return SourceInfo(
         steps=steps,
         bindings=bindings,
+        param_docs=param_docs,
         enums=enums,
         macros=macros,
         macro_tokens=macro_tokens,

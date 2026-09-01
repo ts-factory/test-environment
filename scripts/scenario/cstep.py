@@ -21,21 +21,30 @@ _STRING = re.compile(r'\s*"((?:[^"\\]|\\.)*)"')
 
 _ESCAPES = {'n': ' ', 't': ' ', '"': '"', '\\': '\\'}
 
+# For doc strings, where line structure matters, \n stays a newline.
+DOC_ESCAPES = {'n': '\n', 't': ' ', '"': '"', '\\': '\\'}
 
-def _unescape(s: str) -> str:
+
+def unescape(s: str, escapes: dict[str, str] | None = None) -> str:
     r"""Decode C string escapes the way the compiler would.
 
     A single pass, so an escaped backslash cannot be re-read as the
     start of another escape; an unknown escape keeps its character,
     matching the compiler's behavior for the likes of "\-".
+
+    Args:
+        s: The literal's content, without the surrounding quotes.
+        escapes: Escape table; the default flattens \n and \t to
+            spaces the way step texts want.
     """
+    table = _ESCAPES if escapes is None else escapes
     out = []
     i = 0
     while i < len(s):
         c = s[i]
         if c == '\\' and i + 1 < len(s):
             nxt = s[i + 1]
-            out.append(_ESCAPES.get(nxt, nxt))
+            out.append(table.get(nxt, nxt))
             i += 2
         else:
             out.append(c)
@@ -55,7 +64,7 @@ def extract_steps(text: str) -> list[tuple[int, str]]:
             sm = _STRING.match(text, pos)
             if sm is None:
                 break
-            parts.append(_unescape(sm.group(1)))
+            parts.append(unescape(sm.group(1)))
             pos = sm.end()
         if kind == 'STEP':
             depth = 1
