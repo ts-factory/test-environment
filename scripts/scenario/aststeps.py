@@ -788,10 +788,30 @@ def _param_doc(cursor: object, line: int) -> ParamDoc | None:
     return ParamDoc(name=name, text='\n'.join(lines), line=line)
 
 
+def _wrapper_binding(cursor: object, line: int, map_macro: str) -> Binding | None:
+    """A Binding for a use of a harvested wrapper getter.
+
+    The wrapper reads its first argument through
+    TEST_GET_ENUM_PARAM with a fixed mapping-list macro, so the use
+    binds as an enum parameter with that mapping recorded for
+    resolution.
+
+    Args:
+        cursor: A macro instantiation cursor of the wrapper.
+        line: Source line of the use, stored in the binding.
+        map_macro: The mapping-list macro the wrapper reads through.
+    """
+    margs = _macro_args(cursor)
+    if not margs or not margs[0].isidentifier():
+        return None
+    return Binding(name=margs[0], kind='enum', line=line, map_macros=[map_macro])
+
+
 def _walk(  # type: ignore[no-any-unimported]
     tu: cindex.TranslationUnit,
     funcs: list[tuple[object, tuple[int, int, int, int], list]],
     source: Path,
+    wrappers: dict[str, str] | None = None,
 ) -> SourceInfo:
     """Walk the parsed tree once, collecting steps, bindings, and declarations.
 
@@ -803,6 +823,9 @@ def _walk(  # type: ignore[no-any-unimported]
         funcs: (cursor, extent key, control regions) per function
             definition, for attributing steps.
         source: The analyzed source, for the in-this-file filter.
+        wrappers: Wrapper getter names mapped to their mapping-list
+            macros; uses bind as enum parameters.  The tracked
+            getters win on a name clash.
     """
     steps = []
     bindings: dict[str, Binding] = {}
@@ -826,6 +849,8 @@ def _walk(  # type: ignore[no-any-unimported]
         kind = _MACROS.get(cursor.spelling)
         if kind is None:
             binding = _param_binding(cursor, loc.line)
+            if binding is None and wrappers and cursor.spelling in wrappers:
+                binding = _wrapper_binding(cursor, loc.line, wrappers[cursor.spelling])
             if binding is not None:
                 bindings.setdefault(binding.name, binding)
             continue
@@ -855,6 +880,7 @@ def analyze(
     source: Path,
     compile_db: Path | None = None,
     extra_args: list[str] | None = None,
+    wrappers: dict[str, str] | None = None,
 ) -> SourceInfo:
     """Analyze a test source: steps, parameter bindings, and declarations.
 
@@ -864,6 +890,8 @@ def analyze(
             from; None parses with the extra arguments alone.
         extra_args: Additional compiler arguments, e.g. -D stubs for
             the step macros when no compile database is available.
+        wrappers: Wrapper getter names mapped to their mapping-list
+            macros (see cmaps); their uses bind as enum parameters.
 
     Returns:
         The steps in source order plus everything needed to bind
@@ -901,7 +929,7 @@ def analyze(
         )
     ]
 
-    info = _walk(tu, funcs, source)
+    info = _walk(tu, funcs, source, wrappers)
     _resolve_mappings(info)
     return info
 

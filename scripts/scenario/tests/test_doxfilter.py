@@ -9,7 +9,7 @@ import pytest
 
 import aststeps
 from aststeps import Cond
-from doxfilter import filter_text, merge_params, render_dox
+from doxfilter import add_values, filter_text, merge_params, render_dox
 from steptree import Node
 
 HEADER_SRC = """\
@@ -281,3 +281,95 @@ def test_merge_params_no_header_params_no_marker() -> None:
         ' *',
         ' * @param mode Info',
     ]
+
+
+def _doc(name: str, text: str) -> aststeps.ParamDoc:
+    return aststeps.ParamDoc(name=name, text=text, line=1)
+
+
+def _enum_binding(name: str, macro: str) -> aststeps.Binding:
+    return aststeps.Binding(name=name, kind='enum', line=1, map_macros=[macro])
+
+
+def test_add_values_appends_for_enum() -> None:
+    docs = add_values(
+        [_doc('mode', 'Operation mode')],
+        {'mode': _enum_binding('mode', 'MODE_MAP')},
+        {'MODE_MAP': ['FAST', 'SAFE']},
+    )
+    assert docs[0].text == 'Operation mode\n- Possible values: `FAST`, `SAFE`'
+
+
+def test_add_values_explicit_list_wins() -> None:
+    text = 'Operation mode:\n- `FAST`: skip checks\n- `SAFE`: full validation'
+    docs = add_values(
+        [_doc('mode', text)],
+        {'mode': _enum_binding('mode', 'MODE_MAP')},
+        {'MODE_MAP': ['FAST', 'SAFE']},
+    )
+    assert docs[0].text == text
+
+
+def test_add_values_skips_bool_and_unmapped() -> None:
+    bool_binding = aststeps.Binding(name='flag', kind='bool', line=1)
+    docs = add_values(
+        [_doc('flag', 'A toggle'), _doc('other', 'No binding')],
+        {'flag': bool_binding},
+        {'BOOL_MAPPING_LIST': ['TRUE', 'FALSE']},
+    )
+    assert [d.text for d in docs] == ['A toggle', 'No binding']
+
+
+WRAPPER_SRC = """\
+/** @defgroup demo-vals Demo values
+ * @objective Check values
+ *
+ * @par Scenario:
+ */
+
+#define MODE_MAPPING_LIST \\
+    { "FAST", 1 }, \\
+    { "SAFE", 2 }
+
+#define TEST_GET_MODE(var_name_) \\
+    TEST_GET_ENUM_PARAM(var_name_, MODE_MAPPING_LIST)
+
+int
+main(void)
+{
+    int mode;
+    int state;
+
+    TEST_PARAM_DOC(mode, "Operation mode");
+    TEST_GET_MODE(mode);
+    TEST_PARAM_DOC(state, "Device state");
+    TEST_GET_ETHDEV_STATE(state);
+    TEST_STEP("Run");
+    return 0;
+}
+"""
+
+
+@pytest.mark.skipif(not aststeps.HAVE_CLANG, reason='libclang not installed')
+def test_filter_appends_mapping_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tapi = tmp_path / 'te' / 'lib' / 'tapi'
+    tapi.mkdir(parents=True)
+    (tapi / 'tapi_test.h').write_text(
+        '#define ETHDEV_STATE_MAPPING_LIST \\\n'
+        '    { "INITIALIZED", 1 }, \\\n'
+        '    { "STARTED", 2 }\n'
+        '#define TEST_GET_ETHDEV_STATE(var_name_) \\\n'
+        '    TEST_GET_ENUM_PARAM(var_name_, ETHDEV_STATE_MAPPING_LIST)\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setenv('TE_BASE', str(tmp_path / 'te'))
+    src = tmp_path / 'demo.c'
+    src.write_text(WRAPPER_SRC, encoding='utf-8')
+    lines = filter_text(src).splitlines()
+    cont = ' * ' + ' ' * len('@param state ')
+    assert ' * @param mode  Operation mode' in lines
+    assert f'{cont}- Possible values: `FAST`, `SAFE`' in lines
+    assert ' * @param state Device state' in lines
+    assert f'{cont}- Possible values: `INITIALIZED`, `STARTED`' in lines

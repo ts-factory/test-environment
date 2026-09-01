@@ -175,6 +175,15 @@ header-only entries survive in front of the generated ones. The
 end state of a migrated test has no ``@param`` in the header at
 all.
 
+For a parameter read through an enum getter - a direct
+``TEST_GET_ENUM_PARAM()`` or a wrapper like
+``TEST_GET_ETHDEV_STATE()`` - the filter appends the allowed value
+names to the description automatically, taken from the getter's
+mapping-list macro (harvested from the test source and the TAPI
+headers under ``TE_BASE``). An explicit value list in the doc
+suppresses the mechanical one: write your own bullets when the
+values deserve explanations.
+
 ``scenario.py check`` enforces coverage: a parameter read with no
 documentation, a doc without a matching read, a duplicated doc,
 and description drift against the ``package.md`` parameter list

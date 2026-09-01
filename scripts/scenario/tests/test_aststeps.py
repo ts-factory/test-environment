@@ -255,3 +255,21 @@ def test_param_doc_malformed_skipped(tmp_path: Path) -> None:
     )
     info = aststeps.analyze(src, extra_args=['-DTEST_PARAM_DOC(...)=(void)0'])
     assert info.param_docs == []
+
+
+@pytest.mark.skipif(not aststeps.HAVE_CLANG, reason='libclang not installed')
+def test_wrapper_binding(tmp_path: Path) -> None:
+    src = tmp_path / 'demo.c'
+    src.write_text(
+        'int main(void)\n{\n    int mode;\n\n'
+        '    TEST_GET_MODE(mode);\n    return mode;\n}\n',
+        encoding='utf-8',
+    )
+    info = aststeps.analyze(
+        src,
+        extra_args=['-DTEST_GET_MODE(...)=(void)0'],
+        wrappers={'TEST_GET_MODE': 'MODE_MAPPING_LIST'},
+    )
+    binding = info.bindings['mode']
+    assert binding.kind == 'enum'
+    assert binding.map_macros == ['MODE_MAPPING_LIST']

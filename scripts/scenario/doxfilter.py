@@ -23,10 +23,12 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import aststeps
+import cmaps
 from cheader import param_spans, split_source
 from steptree import Node, build, cond_label
 
@@ -68,6 +70,55 @@ def render_dox(nodes: list[Node], depth: int = 0) -> list[str]:
         bullet = '-#' if depth == 0 else '-'
         out.append(f'{"   " * (depth + 1)}{bullet} {text}')
         out.extend(render_dox(node.children, depth + 1))
+    return out
+
+
+def _map_paths(source: Path) -> list[Path]:
+    """Header files whose mappings and wrappers this test may use.
+
+    The test's own file and directory come first so local
+    definitions win; the TAPI headers under TE_BASE provide the
+    shared wrappers (TEST_GET_ETHDEV_STATE and friends).
+    """
+    paths = [source, *sorted(source.parent.glob('*.h'))]
+    te_base = os.environ.get('TE_BASE')
+    if te_base:
+        paths += sorted((Path(te_base) / 'lib' / 'tapi').glob('*.h'))
+    return paths
+
+
+def add_values(
+    docs: list[aststeps.ParamDoc],
+    bindings: dict[str, aststeps.Binding],
+    mappings: dict[str, list[str]],
+) -> list[aststeps.ParamDoc]:
+    """Docs with 'Possible values:' appended from value mappings.
+
+    Only enum parameters gain the line, and only when the doc does
+    not already carry an explicit value list (a markdown bullet
+    line): a hand-written list explaining each value wins over the
+    mechanical one.
+
+    Args:
+        docs: The inline docs, in emission order.
+        bindings: Parameter bindings by name, for the mapping link.
+        mappings: Value names by mapping-list macro name.
+    """
+    out: list[aststeps.ParamDoc] = []
+    for doc in docs:
+        binding = bindings.get(doc.name)
+        names: list[str] = []
+        if binding is not None and binding.kind == 'enum':
+            for macro in binding.map_macros:
+                names += mappings.get(macro, [])
+        listed = any(line.lstrip().startswith('-') for line in doc.text.split('\n'))
+        if not names or listed:
+            out.append(doc)
+            continue
+        joined = ', '.join(f'`{name}`' for name in names)
+        # A bullet, not a plain continuation line: doxygen would fold
+        # a plain line into the description paragraph.
+        out.append(replace(doc, text=f'{doc.text}\n- Possible values: {joined}'))
     return out
 
 
@@ -192,16 +243,23 @@ def filter_text(source: Path) -> str:
         return ''
     header, trailing = split
     header, authors = _split_authors(header)
-    info = aststeps.analyze(source, extra_args=_STUBS)
+    wrappers, mappings = cmaps.harvest(_map_paths(source))
+    stubs = _STUBS + [
+        f'-D{name}(...)=(void)0'
+        for name in sorted(wrappers)
+        if name not in aststeps.PARAM_MACROS
+    ]
+    info = aststeps.analyze(source, extra_args=stubs, wrappers=wrappers)
     steps = info.steps
-    documented = {d.name for d in info.param_docs}
+    docs = add_values(info.param_docs, info.bindings, mappings)
+    documented = {d.name for d in docs}
     documented.update(name for name, _, _ in param_spans(header))
     for name in sorted(set(info.bindings) - documented):
         print(
             f'doxfilter: warning: {source}: parameter {name} is undocumented',
             file=sys.stderr,
         )
-    header = merge_params(header, info.param_docs)
+    header = merge_params(header, docs)
     out = list(header)
     if steps:
         if not any('@par Scenario' in line for line in header):
