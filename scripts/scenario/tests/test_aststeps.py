@@ -200,3 +200,58 @@ def test_bindings(tmp_path: Path) -> None:
 def test_extract_still_returns_steps(tmp_path: Path) -> None:
     steps = extract(write_fixture(tmp_path), extra_args=MACRO_DEFS)
     assert steps and steps[0].text == 'From a helper'  # noqa: PT018 - single condition read
+
+
+PARAM_DOC_SRC = """\
+int
+main(void)
+{
+    int mode = 0;
+
+    TEST_PARAM_DOC(mode,
+        "Operation mode selecting how"
+        " aggressively we validate:",
+        "- fast: skip checks, whatever the cost",
+        "- safe: full validation");
+    TEST_GET_INT_PARAM(mode);
+    TEST_PARAM_DOC(mode, "duplicate entry");
+    TEST_STEP("Run");
+    return mode;
+}
+"""
+
+PARAM_DOC_STUBS = [
+    '-DTEST_PARAM_DOC(...)=(void)0',
+    '-DTEST_GET_INT_PARAM(...)=(void)0',
+    '-DTEST_STEP(...)=(void)0',
+]
+
+
+@pytest.mark.skipif(not aststeps.HAVE_CLANG, reason='libclang not installed')
+def test_param_doc_extraction(tmp_path: Path) -> None:
+    src = tmp_path / 'demo.c'
+    src.write_text(PARAM_DOC_SRC, encoding='utf-8')
+    info = aststeps.analyze(src, extra_args=PARAM_DOC_STUBS)
+    assert [(d.name, d.text) for d in info.param_docs] == [
+        (
+            'mode',
+            (
+                'Operation mode selecting how aggressively we validate:\n'
+                '- fast: skip checks, whatever the cost\n'
+                '- safe: full validation'
+            ),
+        ),
+        ('mode', 'duplicate entry'),
+    ]
+    assert info.param_docs[0].line == 6
+
+
+@pytest.mark.skipif(not aststeps.HAVE_CLANG, reason='libclang not installed')
+def test_param_doc_malformed_skipped(tmp_path: Path) -> None:
+    src = tmp_path / 'demo.c'
+    src.write_text(
+        'int main(void)\n{\n    TEST_PARAM_DOC(lonely);\n    return 0;\n}\n',
+        encoding='utf-8',
+    )
+    info = aststeps.analyze(src, extra_args=['-DTEST_PARAM_DOC(...)=(void)0'])
+    assert info.param_docs == []

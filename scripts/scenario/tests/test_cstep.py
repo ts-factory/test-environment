@@ -4,7 +4,7 @@
 
 from pathlib import Path
 
-from cstep import compare, extract_steps
+from cstep import DOC_ESCAPES, compare, extract_steps, unescape
 from model import Step, Test
 
 C_TEXT = """
@@ -114,3 +114,8 @@ def test_extract_info_variants_excluded() -> None:
         'TEST_STEP_POP_INFO("");\n'
     )
     assert extract_steps(text) == [(1, 'Visible')]
+
+
+def test_unescape_doc_table() -> None:
+    assert unescape(r'a\nb', DOC_ESCAPES) == 'a\nb'
+    assert unescape(r'say \"hi\", twice') == 'say "hi", twice'
