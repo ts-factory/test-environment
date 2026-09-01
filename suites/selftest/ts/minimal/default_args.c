@@ -30,7 +30,9 @@ main(int argc, char **argv)
     int test_arg2 = -1;
 
     TEST_START;
+    TEST_PARAM_DOC(test_arg1, "First argument defaulted in package.xml");
     TEST_GET_INT_PARAM(test_arg1);
+    TEST_PARAM_DOC(test_arg2, "Second argument defaulted in package.xml");
     TEST_GET_INT_PARAM(test_arg2);
 
     TEST_STEP("Print values of default arguments");

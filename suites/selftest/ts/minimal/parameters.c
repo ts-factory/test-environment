@@ -75,7 +75,15 @@ main(int argc, char **argv)
     TEST_GET_UINT_PARAM(uint_param);
     TEST_GET_UINT64_PARAM(uint64_param);
     TEST_GET_DOUBLE_PARAM(dbl_param);
+    TEST_PARAM_DOC(unit_param,
+        "Value with a decimal unit prefix:",
+        "- a plain number (no prefix)",
+        "- k, M, G, T suffixes (powers of 1000)");
     TEST_GET_VALUE_UNIT_PARAM(unit_param);
+    TEST_PARAM_DOC(bin_unit_param,
+        "Value with a binary unit prefix:",
+        "- a plain number (no prefix)",
+        "- k, M, G, T suffixes (powers of 1024)");
     TEST_GET_VALUE_BIN_UNIT_PARAM(bin_unit_param);
     TEST_GET_BOOL_PARAM(true_param);
     TEST_GET_BOOL_PARAM(false_param);
