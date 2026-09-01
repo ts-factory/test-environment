@@ -162,6 +162,23 @@ def test_check_param_docs(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     assert main(['check', '-t', str(tmp_path)]) == 1
     assert 'parameter other is undocumented' in capsys.readouterr().out
 
+    assert (
+        main(
+            [
+                'generate',
+                'usecases/two',
+                '-t',
+                str(tmp_path),
+                '--author',
+                'A <a@b.c>',
+                '--force',
+            ]
+        )
+        == 0
+    )
+    assert main(['check', '-t', str(tmp_path), '--strict']) == 0
+    assert '@param' not in c.read_text(encoding='utf-8')
+
 
 def test_unknown_test(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     suite = make_suite(tmp_path)

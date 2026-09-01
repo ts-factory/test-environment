@@ -8,7 +8,7 @@ import re
 import textwrap
 from typing import TYPE_CHECKING
 
-from model import flatten_steps, resolve_inline
+from model import flatten_steps, param_doc_lines, resolve_inline
 
 if TYPE_CHECKING:
     from model import Note, Package, Param, Test
@@ -45,27 +45,6 @@ def _doxy_para(out: list[str], key: str, text: str) -> None:
     out.extend(_wrap(f'{key} {text}', first, cont))
 
 
-def _doxy_params(out: list[str], test: Test) -> None:
-    names = [p.name for p in test.params]
-    values = [v.name for p in test.params for v in p.values]
-    width = max(len(p.name) for p in test.params)
-    desc_col = len('@param ') + width + 1
-    for p in test.params:
-        desc = resolve_inline(p.description, names, values)
-        if p.values:
-            desc = desc.rstrip('.:') + ':'
-        first = ' * '
-        cont = ' * ' + ' ' * desc_col
-        out.extend(_wrap(f'@param {p.name:<{width}} {desc}', first, cont))
-        for v in p.values:
-            text = f'- @c {v.name}'
-            if v.comment:
-                text += f' ({v.comment})'
-            vfirst = ' * ' + ' ' * desc_col
-            vcont = vfirst + '  '
-            out.extend(_wrap(text, vfirst, vcont))
-
-
 def _emit_macro(out: list[str], macro: str, text: str) -> None:
     # The text becomes a C string literal: escape what the compiler
     # would otherwise interpret.
@@ -79,6 +58,45 @@ def _emit_macro(out: list[str], macro: str, text: str) -> None:
     cont = ' ' * (len(prefix) - 1) + '"'
     out.extend(f'{cont}{line} "' for line in lines[1:-1])
     out.append(f'{cont}{lines[-1]}");')
+
+
+def _c_literal(text: str) -> str:
+    """The text as a C string literal body (escapes applied)."""
+    return text.replace('\\', '\\\\').replace('"', '\\"')
+
+
+def _emit_param_doc(
+    out: list[str],
+    p: Param,
+    names: list[str],
+    values: list[str],
+) -> None:
+    """Emit the TEST_PARAM_DOC call for one parameter.
+
+    One string argument per doc line; a line too long for the
+    width continues in adjacent literals on the following lines.
+    Wrapping only breaks at whitespace (never inside a word) so an
+    escaped quote or backslash can never be split across literals;
+    a single unbroken word longer than the width is emitted as-is,
+    over budget, rather than risk corrupting the escape.
+    """
+    lines = param_doc_lines(p, names, values)
+    one = f'    TEST_PARAM_DOC({p.name}, "{_c_literal(lines[0])}");'
+    if len(lines) == 1 and len(one) <= _WIDTH:
+        out.append(one)
+        return
+    out.append(f'    TEST_PARAM_DOC({p.name},')
+    indent = ' ' * len('    TEST_PARAM_DOC(')
+    for i, line in enumerate(lines):
+        end = ');' if i == len(lines) - 1 else ','
+        pieces = textwrap.wrap(
+            _c_literal(line),
+            width=_WIDTH - len(indent) - 4,
+            break_long_words=False,
+            break_on_hyphens=False,
+        ) or ['']
+        out.extend(f'{indent}"{piece} "' for piece in pieces[:-1])
+        out.append(f'{indent}"{pieces[-1]}"{end}')
 
 
 def _emit_notes(
@@ -149,9 +167,6 @@ def emit_test(
     for note in test.notes:
         out.append(' *')
         _doxy_para(out, '@note', resolve_inline(note, names, values))
-    if test.params:
-        out.append(' *')
-        _doxy_params(out, test)
     if test.type:
         out.append(' *')
         out.append(f' * @type {test.type}')
@@ -181,9 +196,12 @@ def _emit_main(out: list[str], test: Test) -> None:
             else:
                 out.append(f'    const char *{p.name};')
         out.append('')
+    names = [p.name for p in test.params]
+    values = [v.name for p in test.params for v in p.values]
     out.append('    TEST_START;')
     for p in test.params:
         kind = _param_kind(p)
+        _emit_param_doc(out, p, names, values)
         if kind == 'uint':
             out.append(f'    TEST_GET_UINT_PARAM({p.name});')
         else:
