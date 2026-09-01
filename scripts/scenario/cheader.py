@@ -96,6 +96,31 @@ def _header_tags(header: list[str]) -> list[tuple[str, str]]:
     return tags
 
 
+def param_spans(header: list[str]) -> list[tuple[str, int, int]]:
+    """(name, start, stop) per @param block of a header comment.
+
+    A block is the @param line plus its continuation lines: the
+    non-blank lines below it that do not start another @tag.
+    Indices are into the header list, stop exclusive.
+    """
+    spans: list[tuple[str, int, int]] = []
+    start: int | None = None
+    name = ''
+    for i, raw in enumerate(header):
+        line = raw.strip().lstrip('/').lstrip('*').strip()
+        m = _TAG.match(line)
+        if m or not line:
+            if start is not None:
+                spans.append((name, start, i))
+                start = None
+            if m and m.group(1) == 'param' and m.group(2):
+                start = i
+                name = m.group(2).split(maxsplit=1)[0]
+    if start is not None:
+        spans.append((name, start, len(header)))
+    return spans
+
+
 def parse_doc_header(text: str) -> tuple[str, str, str | None, list[tuple[str, str]]]:
     """(summary, objective, type, params) from the doxygen header.
 
