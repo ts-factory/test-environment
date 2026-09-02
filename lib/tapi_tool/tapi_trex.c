@@ -33,6 +33,7 @@
 #include "te_sockaddr.h"
 
 #include "conf_oid.h"
+#include "rcf_api.h"
 
 /** TRex dummy interface name. */
 #define TAPI_TREX_DUMMY "dummy"
@@ -548,14 +549,6 @@ tapi_trex_gen_astf_config(const char *ta, const tapi_trex_opt *opt)
     te_kvpair_h kvpairs;
     te_kvpair_init(&kvpairs);
 
-    te_string_append(&template, "%s", opt->astf_template);
-
-    tapi_trex_gen_clients_astf_conf(opt->clients, &kvpairs);
-    tapi_trex_gen_servers_astf_conf(opt->servers, &kvpairs);
-
-    if (opt->astf_vars != NULL)
-        te_kvpairs_copy(&kvpairs, opt->astf_vars);
-
     rc = te_snprintf(astf_json_path, sizeof(astf_json_path),
                      TAPI_TREX_ASTF_CONF_FMT,
                      prefix_is_empty ? "" : "-",
@@ -566,6 +559,37 @@ tapi_trex_gen_astf_config(const char *ta, const tapi_trex_opt *opt)
         ERROR("Failed to generate TRex ASTF config file name: %r", rc);
         goto cleanup;
     }
+
+    /*
+     * An already expanded profile may be far larger than an RPC buffer,
+     * so it is shipped to the agent as a file instead of a string.
+     *
+     * This branch must stay above the te_string_append() of
+     * astf_template below. A caller that sets astf_template_file is
+     * entitled to leave astf_template as NULL, and glibc renders a NULL
+     * argument of "%s" as the literal text "(null)" rather than failing.
+     * Appending first would therefore not crash: it would quietly ship a
+     * profile containing "(null)" to the traffic generator and produce a
+     * wrong run that looks like a real one.
+     */
+    if (opt->astf_template_file != NULL)
+    {
+        rc = rcf_ta_put_file(ta, 0, opt->astf_template_file, astf_json_path);
+        if (rc != 0)
+        {
+            ERROR("Failed to copy TRex ASTF config '%s' to '%s': %r",
+                  opt->astf_template_file, astf_json_path, rc);
+        }
+        goto cleanup;
+    }
+
+    te_string_append(&template, "%s", opt->astf_template);
+
+    tapi_trex_gen_clients_astf_conf(opt->clients, &kvpairs);
+    tapi_trex_gen_servers_astf_conf(opt->servers, &kvpairs);
+
+    if (opt->astf_vars != NULL)
+        te_kvpairs_copy(&kvpairs, opt->astf_vars);
 
     rc = tapi_file_expand_kvpairs(ta, template.ptr, NULL, &kvpairs,
                                   astf_json_path);
