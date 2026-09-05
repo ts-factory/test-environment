@@ -1958,13 +1958,7 @@ int
 tapi_cfg_net_use_configured_ip(unsigned int af, cfg_net_t *net)
 {
     int                 rc;
-    cfg_val_type        type;
-    char               *str;
     unsigned int        i;
-    cfg_handle          net_hndl;
-    unsigned int        net_pfx;
-    cfg_handle          entry_hndl;
-    cfg_handle          addr_hndl;
     struct sockaddr     addr;
 
     if (net == NULL)
