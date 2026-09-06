@@ -210,14 +210,28 @@ reject_negative(const char *value)
     return 0;
 }
 
+/* Node value parsed from its wire representation */
+typedef struct codec_value {
+    const char *as_str;
+    bool        as_bool;
+    int8_t      as_int8;
+    uint8_t     as_uint8;
+    int16_t     as_int16;
+    uint16_t    as_uint16;
+    int32_t     as_int32;
+    uint32_t    as_uint32;
+    int64_t     as_int64;
+    uint64_t    as_uint64;
+    int         as_enum;
+} codec_value;
+
 /*
- * Parse into the widest temporary of the target's signedness and
- * check the value against the target width's bounds before
- * narrowing, so that a value the node cannot hold is refused instead
- * of being silently truncated by the framework.  op_ is the handler
- * union to dispatch through (set or add), s_ the accessor suffix.
+ * Both parse into the widest temporary of their signedness and check
+ * the value against the target width's bounds before narrowing, so
+ * that a value the node cannot hold is refused instead of being
+ * silently truncated by the framework.
  */
-#define CODEC_INT(op_, s_, min_, max_)                          \
+#define CODEC_PARSE_INT(s_, min_, max_)                         \
     do {                                                        \
         intmax_t raw;                                           \
         te_errno rc = te_strtoimax(value, 10, &raw);            \
@@ -226,10 +240,11 @@ reject_negative(const char *value)
             return TE_RC(TE_RCF_PCH, rc);                       \
         if (raw < (intmax_t)(min_) || raw > (intmax_t)(max_))   \
             return TE_RC(TE_RCF_PCH, TE_ERANGE);                \
-        return n->op_.as_##s_(ctx, (s_##_t)raw);                \
+        v->as_##s_ = raw;                                       \
+        return 0;                                               \
     } while (0)
 
-#define CODEC_UINT(op_, s_, max_)                               \
+#define CODEC_PARSE_UINT(s_, max_)                              \
     do {                                                        \
         uintmax_t raw;                                          \
         te_errno rc = reject_negative(value);                   \
@@ -241,39 +256,40 @@ reject_negative(const char *value)
             return TE_RC(TE_RCF_PCH, rc);                       \
         if (raw > (uintmax_t)(max_))                            \
             return TE_RC(TE_RCF_PCH, TE_ERANGE);                \
-        return n->op_.as_##s_(ctx, (s_##_t)raw);                \
+        v->as_##s_ = raw;                                       \
+        return 0;                                               \
     } while (0)
 
-/* Parse value and call the node's set handler */
+/*
+ * Parse value into the member of @p v matching the node's type.
+ * Shared by set and add so that both accept exactly the same
+ * representation of every type.
+ */
 static te_errno
-codec_set(ta_conf_ctx *ctx, const char *value)
+codec_parse(const ta_conf_node *n, const char *value, codec_value *v)
 {
-    const ta_conf_node *n = ctx->node;
-
     switch (n->type)
     {
         case CVT_STRING:
-        {
-            int v;
-
             /* A map means the wire value is a name; see codec_get() */
             if (n->map == NULL)
-                return n->set.as_str(ctx, value);
-
-            v = te_enum_map_from_str(n->map, value, INT_MIN);
-            if (v == INT_MIN)
+            {
+                v->as_str = value;
+                return 0;
+            }
+            v->as_enum = te_enum_map_from_str(n->map, value, INT_MIN);
+            if (v->as_enum == INT_MIN)
                 return TE_RC(TE_RCF_PCH, TE_EINVAL);
-            return n->set.as_enum(ctx, v);
-        }
+            return 0;
 
-        case CVT_INT8:   CODEC_INT(set, int8, INT8_MIN, INT8_MAX);
-        case CVT_UINT8:  CODEC_UINT(set, uint8, UINT8_MAX);
-        case CVT_INT16:  CODEC_INT(set, int16, INT16_MIN, INT16_MAX);
-        case CVT_UINT16: CODEC_UINT(set, uint16, UINT16_MAX);
-        case CVT_INT32:  CODEC_INT(set, int32, INT32_MIN, INT32_MAX);
-        case CVT_UINT32: CODEC_UINT(set, uint32, UINT32_MAX);
-        case CVT_INT64:  CODEC_INT(set, int64, INT64_MIN, INT64_MAX);
-        case CVT_UINT64: CODEC_UINT(set, uint64, UINT64_MAX);
+        case CVT_INT8:   CODEC_PARSE_INT(int8, INT8_MIN, INT8_MAX);
+        case CVT_UINT8:  CODEC_PARSE_UINT(uint8, UINT8_MAX);
+        case CVT_INT16:  CODEC_PARSE_INT(int16, INT16_MIN, INT16_MAX);
+        case CVT_UINT16: CODEC_PARSE_UINT(uint16, UINT16_MAX);
+        case CVT_INT32:  CODEC_PARSE_INT(int32, INT32_MIN, INT32_MAX);
+        case CVT_UINT32: CODEC_PARSE_UINT(uint32, UINT32_MAX);
+        case CVT_INT64:  CODEC_PARSE_INT(int64, INT64_MIN, INT64_MAX);
+        case CVT_UINT64: CODEC_PARSE_UINT(uint64, UINT64_MAX);
 
         case CVT_BOOL:
         {
@@ -284,12 +300,75 @@ codec_set(ta_conf_ctx *ctx, const char *value)
                 return TE_RC(TE_RCF_PCH, rc);
             if (raw > 1)
                 return TE_RC(TE_RCF_PCH, TE_EINVAL);
-            return n->set.as_bool(ctx, raw != 0);
+            v->as_bool = raw != 0;
+            return 0;
         }
 
-        case CVT_NONE:
         default:
-            TE_FATAL_ERROR("node '%s': set called on a valueless node",
+            TE_FATAL_ERROR("node '%s': value parsed for an unknown type",
+                           n->name);
+            return TE_RC(TE_RCF_PCH, TE_EINVAL);
+    }
+}
+
+#undef CODEC_PARSE_INT
+#undef CODEC_PARSE_UINT
+
+/* Parse value and call the node's set handler */
+static te_errno
+codec_set(ta_conf_ctx *ctx, const char *value)
+{
+    const ta_conf_node *n = ctx->node;
+    codec_value v;
+    te_errno rc;
+
+    if (n->type == CVT_NONE)
+    {
+        TE_FATAL_ERROR("node '%s': set called on a valueless node",
+                       n->name);
+        return TE_RC(TE_RCF_PCH, TE_EINVAL);
+    }
+
+    rc = codec_parse(n, value, &v);
+    if (rc != 0)
+        return rc;
+
+    switch (n->type)
+    {
+        case CVT_STRING:
+            if (n->map == NULL)
+                return n->set.as_str(ctx, v.as_str);
+            return n->set.as_enum(ctx, v.as_enum);
+
+        case CVT_INT8:
+            return n->set.as_int8(ctx, v.as_int8);
+
+        case CVT_UINT8:
+            return n->set.as_uint8(ctx, v.as_uint8);
+
+        case CVT_INT16:
+            return n->set.as_int16(ctx, v.as_int16);
+
+        case CVT_UINT16:
+            return n->set.as_uint16(ctx, v.as_uint16);
+
+        case CVT_INT32:
+            return n->set.as_int32(ctx, v.as_int32);
+
+        case CVT_UINT32:
+            return n->set.as_uint32(ctx, v.as_uint32);
+
+        case CVT_INT64:
+            return n->set.as_int64(ctx, v.as_int64);
+
+        case CVT_UINT64:
+            return n->set.as_uint64(ctx, v.as_uint64);
+
+        case CVT_BOOL:
+            return n->set.as_bool(ctx, v.as_bool);
+
+        default:
+            TE_FATAL_ERROR("node '%s': set called with an unknown type",
                            n->name);
             return TE_RC(TE_RCF_PCH, TE_EINVAL);
     }
@@ -300,49 +379,52 @@ static te_errno
 codec_add(ta_conf_ctx *ctx, const char *value)
 {
     const ta_conf_node *n = ctx->node;
+    codec_value v;
+    te_errno rc;
 
     if (value == NULL)
         value = "";
 
+    if (n->type == CVT_NONE)
+        return n->add.as_none(ctx);
+
+    rc = codec_parse(n, value, &v);
+    if (rc != 0)
+        return rc;
+
     switch (n->type)
     {
-        case CVT_NONE:
-            return n->add.as_none(ctx);
-
         case CVT_STRING:
-        {
-            int v;
-
-            /* A map means the wire value is a name; see codec_get() */
             if (n->map == NULL)
-                return n->add.as_str(ctx, value);
+                return n->add.as_str(ctx, v.as_str);
+            return n->add.as_enum(ctx, v.as_enum);
 
-            v = te_enum_map_from_str(n->map, value, INT_MIN);
-            if (v == INT_MIN)
-                return TE_RC(TE_RCF_PCH, TE_EINVAL);
-            return n->add.as_enum(ctx, v);
-        }
+        case CVT_INT8:
+            return n->add.as_int8(ctx, v.as_int8);
 
-        case CVT_INT8:   CODEC_INT(add, int8, INT8_MIN, INT8_MAX);
-        case CVT_UINT8:  CODEC_UINT(add, uint8, UINT8_MAX);
-        case CVT_INT16:  CODEC_INT(add, int16, INT16_MIN, INT16_MAX);
-        case CVT_UINT16: CODEC_UINT(add, uint16, UINT16_MAX);
-        case CVT_INT32:  CODEC_INT(add, int32, INT32_MIN, INT32_MAX);
-        case CVT_UINT32: CODEC_UINT(add, uint32, UINT32_MAX);
-        case CVT_INT64:  CODEC_INT(add, int64, INT64_MIN, INT64_MAX);
-        case CVT_UINT64: CODEC_UINT(add, uint64, UINT64_MAX);
+        case CVT_UINT8:
+            return n->add.as_uint8(ctx, v.as_uint8);
+
+        case CVT_INT16:
+            return n->add.as_int16(ctx, v.as_int16);
+
+        case CVT_UINT16:
+            return n->add.as_uint16(ctx, v.as_uint16);
+
+        case CVT_INT32:
+            return n->add.as_int32(ctx, v.as_int32);
+
+        case CVT_UINT32:
+            return n->add.as_uint32(ctx, v.as_uint32);
+
+        case CVT_INT64:
+            return n->add.as_int64(ctx, v.as_int64);
+
+        case CVT_UINT64:
+            return n->add.as_uint64(ctx, v.as_uint64);
 
         case CVT_BOOL:
-        {
-            uintmax_t raw;
-            te_errno rc = te_strtoumax(value, 10, &raw);
-
-            if (rc != 0)
-                return TE_RC(TE_RCF_PCH, rc);
-            if (raw > 1)
-                return TE_RC(TE_RCF_PCH, TE_EINVAL);
-            return n->add.as_bool(ctx, raw != 0);
-        }
+            return n->add.as_bool(ctx, v.as_bool);
 
         default:
             TE_FATAL_ERROR("node '%s': add called with an unknown type",
@@ -350,9 +432,6 @@ codec_add(ta_conf_ctx *ctx, const char *value)
             return TE_RC(TE_RCF_PCH, TE_EINVAL);
     }
 }
-
-#undef CODEC_INT
-#undef CODEC_UINT
 
 /*
  * Check that ids[1 .. father->len) of an instance OID match the
