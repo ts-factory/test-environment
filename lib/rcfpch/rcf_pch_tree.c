@@ -21,6 +21,7 @@
 #include "te_vector.h"
 #include "te_enum.h"
 #include "te_queue.h"
+#include "te_sockaddr.h"
 #include "logger_api.h"
 #include "conf_oid.h"
 #include "rcf_ch_api.h"
@@ -178,6 +179,28 @@ codec_get(ta_conf_ctx *ctx, char *value)
             return 0;
         }
 
+        case CVT_ADDRESS:
+        {
+            struct sockaddr_storage v;
+            te_string s = TE_STRING_EXT_BUF_INIT(value, RCF_MAX_VAL);
+            te_errno rc = n->get.as_addr(ctx, &v);
+
+            if (rc != 0)
+                return rc;
+            return te_netaddr2te_str(SA(&v), &s);
+        }
+
+        case CVT_DOUBLE:
+        {
+            double v;
+            te_errno rc = n->get.as_double(ctx, &v);
+
+            if (rc != 0)
+                return rc;
+            snprintf(value, RCF_MAX_VAL, "%g", v);
+            return 0;
+        }
+
         case CVT_NONE:
         default:
             TE_FATAL_ERROR("node '%s': get called on a valueless node",
@@ -223,6 +246,7 @@ typedef struct codec_value {
     int64_t     as_int64;
     uint64_t    as_uint64;
     int         as_enum;
+    struct sockaddr_storage as_addr;
 } codec_value;
 
 /*
@@ -304,6 +328,15 @@ codec_parse(const ta_conf_node *n, const char *value, codec_value *v)
             return 0;
         }
 
+        case CVT_ADDRESS:
+        {
+            te_errno rc = te_netaddr_from_te_str(value, &v->as_addr);
+
+            if (rc != 0)
+                return TE_RC(TE_RCF_PCH, rc);
+            return 0;
+        }
+
         default:
             TE_FATAL_ERROR("node '%s': value parsed for an unknown type",
                            n->name);
@@ -367,6 +400,9 @@ codec_set(ta_conf_ctx *ctx, const char *value)
         case CVT_BOOL:
             return n->set.as_bool(ctx, v.as_bool);
 
+        case CVT_ADDRESS:
+            return n->set.as_addr(ctx, SA(&v.as_addr));
+
         default:
             TE_FATAL_ERROR("node '%s': set called with an unknown type",
                            n->name);
@@ -425,6 +461,9 @@ codec_add(ta_conf_ctx *ctx, const char *value)
 
         case CVT_BOOL:
             return n->add.as_bool(ctx, v.as_bool);
+
+        case CVT_ADDRESS:
+            return n->add.as_addr(ctx, SA(&v.as_addr));
 
         default:
             TE_FATAL_ERROR("node '%s': add called with an unknown type",
@@ -804,6 +843,16 @@ validate(const ta_conf_node *n)
             ERROR("node '%s': map without a single name", n->name);
             return TE_RC(TE_RCF_PCH, TE_EINVAL);
         }
+    }
+
+    /*
+     * Configurator refuses to register an object of type double with
+     * any access but read_only, so such a node can only be read.
+     */
+    if (n->type == CVT_DOUBLE && (has_set(n) || has_add(n)))
+    {
+        ERROR("node '%s': a DOUBLE node cannot have set or add", n->name);
+        return TE_RC(TE_RCF_PCH, TE_EINVAL);
     }
 
     if ((has_add(n) || n->del != NULL) && n->list == NULL)

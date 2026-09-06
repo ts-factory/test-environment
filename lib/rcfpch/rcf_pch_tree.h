@@ -16,6 +16,7 @@
 #define __TE_RCF_PCH_TREE_H__
 
 #include <inttypes.h>
+#include <sys/socket.h>
 
 #include "te_errno.h"
 #include "te_defs.h"
@@ -42,6 +43,12 @@ extern "C" {
  *   @c CVT_INT8 .. @c CVT_UINT64
  *                    integer of exactly that width, decimal on the
  *                    wire, accessed through the matching accessor
+ *   @c CVT_ADDRESS   network address (IPv4, IPv6, a link-layer
+ *                    address or @c AF_UNSPEC), spelled the way
+ *                    te_netaddr2te_str() spells it
+ *   @c CVT_DOUBLE    floating point, printed with "%g".  Read-only:
+ *                    an object of that type must be declared
+ *                    read_only, so such a node has no set or add
  *
  * @c CVT_UNSPECIFIED is not a value type and is rejected at
  * registration.
@@ -116,11 +123,15 @@ typedef union ta_conf_get_fn {
     te_errno (*as_uint32)(ta_conf_ctx *ctx, uint32_t *val);
     te_errno (*as_int64)(ta_conf_ctx *ctx, int64_t *val);
     te_errno (*as_uint64)(ta_conf_ctx *ctx, uint64_t *val);
+    te_errno (*as_double)(ta_conf_ctx *ctx, double *val);
+    te_errno (*as_addr)(ta_conf_ctx *ctx, struct sockaddr_storage *val);
     te_errno (*as_enum)(ta_conf_ctx *ctx, int *val);
 } ta_conf_get_fn;
 
 /**
- * Set handler; the member must match the node's type.
+ * Set handler; the member must match the node's type.  There is no
+ * as_double: Configurator only registers an object of type double as
+ * read_only, so a node of that type is never written.
  *
  * @param ctx           request context
  * @param val           new value
@@ -138,6 +149,7 @@ typedef union ta_conf_set_fn {
     te_errno (*as_uint32)(ta_conf_ctx *ctx, uint32_t val);
     te_errno (*as_int64)(ta_conf_ctx *ctx, int64_t val);
     te_errno (*as_uint64)(ta_conf_ctx *ctx, uint64_t val);
+    te_errno (*as_addr)(ta_conf_ctx *ctx, const struct sockaddr *val);
     te_errno (*as_enum)(ta_conf_ctx *ctx, int val);
 } ta_conf_set_fn;
 
@@ -163,6 +175,7 @@ typedef union ta_conf_add_fn {
     te_errno (*as_uint32)(ta_conf_ctx *ctx, uint32_t val);
     te_errno (*as_int64)(ta_conf_ctx *ctx, int64_t val);
     te_errno (*as_uint64)(ta_conf_ctx *ctx, uint64_t val);
+    te_errno (*as_addr)(ta_conf_ctx *ctx, const struct sockaddr *val);
     te_errno (*as_enum)(ta_conf_ctx *ctx, int val);
 } ta_conf_add_fn;
 
@@ -1120,6 +1133,64 @@ extern te_errno ta_conf_register(const char *father,
                   .set = { .as_str = (set_) }, \
                   .add = { .as_str = (add_) }, .del = (del_), \
                   .list = (list_), \
+                  .children = TA_CONF_CHILDREN(__VA_ARGS__))
+
+/**
+ * Read-only address-valued leaf.
+ *
+ * @param name_         node's Configurator sub-identifier
+ * @param get_          get handler (as_addr)
+ * @param ...           child node pointers, in sibling order
+ */
+#define TA_CONF_RO_ADDRESS(name_, get_, ...) \
+    TA_CONF__NODE(.name = (name_), .type = CVT_ADDRESS, \
+                  .get = { .as_addr = (get_) }, \
+                  .children = TA_CONF_CHILDREN(__VA_ARGS__))
+
+/**
+ * Read-write address-valued leaf.
+ *
+ * @param name_         node's Configurator sub-identifier
+ * @param get_          get handler (as_addr)
+ * @param set_          set handler (as_addr)
+ * @param ...           child node pointers, in sibling order
+ */
+#define TA_CONF_RW_ADDRESS(name_, get_, set_, ...) \
+    TA_CONF__NODE(.name = (name_), .type = CVT_ADDRESS, \
+                  .get = { .as_addr = (get_) }, \
+                  .set = { .as_addr = (set_) }, \
+                  .children = TA_CONF_CHILDREN(__VA_ARGS__))
+
+/**
+ * Fully read-write address-valued collection (get/set/add/del/list).
+ *
+ * @param name_         node's Configurator sub-identifier
+ * @param get_          get handler (as_addr)
+ * @param set_          set handler (as_addr)
+ * @param add_          add handler (as_addr)
+ * @param del_          delete handler
+ * @param list_         list handler
+ * @param ...           child node pointers, in sibling order
+ */
+#define TA_CONF_COLL_ADDRESS_RW(name_, get_, set_, add_, del_, list_, ...) \
+    TA_CONF__NODE(.name = (name_), .type = CVT_ADDRESS, \
+                  .get = { .as_addr = (get_) }, \
+                  .set = { .as_addr = (set_) }, \
+                  .add = { .as_addr = (add_) }, .del = (del_), \
+                  .list = (list_), \
+                  .children = TA_CONF_CHILDREN(__VA_ARGS__))
+
+/**
+ * Floating point leaf.  There is no read-write counterpart:
+ * Configurator only registers an object of type double as read_only.
+ *
+ * @param name_         node's Configurator sub-identifier
+ * @param get_          get handler (as_double)
+ * @param ...           child node pointers, in sibling order
+ */
+#define TA_CONF_RO_DOUBLE(name_, get_, ...) \
+    TA_CONF__NODE(.name = (name_), .type = CVT_DOUBLE, \
+                  .get = { .as_double = (get_) }, \
                   .children = TA_CONF_CHILDREN(__VA_ARGS__))
 
 /**
