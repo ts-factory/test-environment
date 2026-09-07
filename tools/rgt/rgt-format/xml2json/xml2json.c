@@ -10,9 +10,13 @@
 #include "config.h"
 #endif
 
+#include <dirent.h>
+#include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <errno.h>
+#include <unistd.h>
 
 #include "logger_defs.h"
 #include "te_raw_log.h"
@@ -43,6 +47,14 @@ size_t xml2fmt_tmpls_num = 0;
 typedef struct depth_ctx_user {
     /** File where to save JSON for the current log node. */
     FILE *f;
+    /** Final name of the JSON file currently being written. */
+    char *final_fname;
+    /** Name of the temporary JSON file currently being written. */
+    char *tmp_fname;
+    /** Descriptor keeping an advisory lock on the temporary file. */
+    int lock_fd;
+    /** Permissions to apply immediately before publishing the file. */
+    mode_t output_mode;
     /** Index in array of JSON files information */
     int file_idx;
     /** Line number of the current message */
@@ -120,6 +132,324 @@ struct poptOption rgt_options_table[] = {
     POPT_TABLEEND
 };
 
+/**
+ * Stop writing an incomplete JSON file and remove it.
+ *
+ * @param depth_user  Per-depth output context.
+ */
+static void
+discard_json_output(depth_ctx_user *depth_user)
+{
+    if (depth_user->f != NULL)
+    {
+        fclose(depth_user->f);
+        depth_user->f = NULL;
+    }
+
+    if (depth_user->tmp_fname != NULL)
+    {
+        unlink(depth_user->tmp_fname);
+        free(depth_user->tmp_fname);
+        depth_user->tmp_fname = NULL;
+    }
+
+    if (depth_user->lock_fd >= 0)
+    {
+        close(depth_user->lock_fd);
+        depth_user->lock_fd = -1;
+    }
+
+    free(depth_user->final_fname);
+    depth_user->final_fname = NULL;
+}
+
+/** Return an allocated name of the directory containing a JSON output. */
+static char *
+json_output_dirname(const char *fname)
+{
+    const char *slash = strrchr(fname, '/');
+
+    if (slash == NULL)
+        return te_string_fmt(".");
+    if (slash == fname)
+        return te_string_fmt("/");
+
+    return te_string_fmt("%.*s", (int)(slash - fname), fname);
+}
+
+/**
+ * Remove temporary files abandoned by interrupted earlier conversions.
+ *
+ * A live converter holds an advisory lock on its temporary file. Therefore a
+ * nonblocking exclusive lock distinguishes abandoned files from files which
+ * are still being written, including when converters run concurrently.
+ *
+ * @param fname  Final JSON file name.
+ */
+static void
+cleanup_stale_json_outputs(const char *fname)
+{
+    const char *basename;
+    const char *slash;
+    char *dir_name;
+    char *tmp_prefix;
+    size_t tmp_prefix_len;
+    DIR *dir;
+    struct dirent *entry;
+
+    slash = strrchr(fname, '/');
+    basename = (slash == NULL) ? fname : slash + 1;
+    dir_name = json_output_dirname(fname);
+
+    tmp_prefix = te_string_fmt(".%s.tmp.", basename);
+    tmp_prefix_len = strlen(tmp_prefix);
+    dir = opendir(dir_name);
+    if (dir == NULL)
+        goto cleanup;
+    if (flock(dirfd(dir), LOCK_EX) != 0)
+    {
+        closedir(dir);
+        goto cleanup;
+    }
+
+    while ((entry = readdir(dir)) != NULL)
+    {
+        const char *tmp_suffix;
+        char *tmp_path;
+        struct stat locked_st;
+        struct stat path_st;
+        int fd;
+        int flags = O_RDONLY;
+
+        if (strncmp(entry->d_name, tmp_prefix, tmp_prefix_len) != 0)
+            continue;
+        tmp_suffix = entry->d_name + tmp_prefix_len;
+        if (strlen(tmp_suffix) != 6 ||
+            strspn(tmp_suffix,
+                   "0123456789"
+                   "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                   "abcdefghijklmnopqrstuvwxyz") != 6)
+        {
+            continue;
+        }
+
+        tmp_path = te_string_fmt("%s/%s", dir_name, entry->d_name);
+#ifdef O_CLOEXEC
+        flags |= O_CLOEXEC;
+#endif
+#ifdef O_NOFOLLOW
+        flags |= O_NOFOLLOW;
+#endif
+        fd = open(tmp_path, flags);
+        if (fd >= 0)
+        {
+            if (flock(fd, LOCK_EX | LOCK_NB) == 0 &&
+                fstat(fd, &locked_st) == 0 && S_ISREG(locked_st.st_mode) &&
+                lstat(tmp_path, &path_st) == 0 &&
+                locked_st.st_dev == path_st.st_dev &&
+                locked_st.st_ino == path_st.st_ino)
+            {
+                unlink(tmp_path);
+            }
+            close(fd);
+        }
+        free(tmp_path);
+    }
+
+    closedir(dir);
+
+cleanup:
+    free(tmp_prefix);
+    free(dir_name);
+}
+
+/**
+ * Open a hidden temporary file next to the requested JSON output.
+ *
+ * Keeping the temporary file in the destination directory makes the final
+ * rename atomic and prevents the web server from observing partially written
+ * JSON under its public name.
+ *
+ * @param depth_user  Per-depth output context.
+ * @param fname       Final JSON file name.
+ *
+ * @return Zero on success, -1 on failure.
+ */
+static int
+open_json_output(depth_ctx_user *depth_user, const char *fname)
+{
+    const char *basename;
+    const char *slash;
+    struct stat st;
+    mode_t mask;
+    char *dir_name;
+    int dir_fd;
+    int fd;
+    int saved_errno;
+
+    discard_json_output(depth_user);
+
+    if (stat(fname, &st) == 0)
+    {
+        depth_user->output_mode = st.st_mode &
+                                  (S_IRWXU | S_IRWXG | S_IRWXO);
+    }
+    else if (errno == ENOENT)
+    {
+        mask = umask(0);
+        umask(mask);
+        depth_user->output_mode = 0666 & ~mask;
+    }
+    else
+    {
+        fprintf(stderr, "Cannot inspect %s file: %s\n",
+                fname, strerror(errno));
+        return -1;
+    }
+
+    cleanup_stale_json_outputs(fname);
+
+    slash = strrchr(fname, '/');
+    basename = (slash == NULL) ? fname : slash + 1;
+
+    depth_user->final_fname = te_string_fmt("%s", fname);
+    if (slash == NULL)
+    {
+        depth_user->tmp_fname =
+            te_string_fmt(".%s.tmp.XXXXXX", basename);
+    }
+    else
+    {
+        depth_user->tmp_fname =
+            te_string_fmt("%.*s.%s.tmp.XXXXXX",
+                          (int)(slash - fname + 1), fname, basename);
+    }
+
+    /*
+     * Exclude stale-file cleanup between creating and locking the new file.
+     * Once the file itself is locked, cleanup can safely run concurrently.
+     */
+    dir_name = json_output_dirname(fname);
+    dir_fd = open(dir_name, O_RDONLY);
+    free(dir_name);
+    if (dir_fd < 0 || flock(dir_fd, LOCK_SH) != 0)
+    {
+        saved_errno = errno;
+        if (dir_fd >= 0)
+            close(dir_fd);
+        errno = saved_errno;
+        fprintf(stderr, "Cannot lock output directory for %s: %s\n",
+                fname, strerror(errno));
+        discard_json_output(depth_user);
+        return -1;
+    }
+
+    fd = mkstemp(depth_user->tmp_fname);
+    if (fd < 0)
+    {
+        saved_errno = errno;
+        close(dir_fd);
+        errno = saved_errno;
+        fprintf(stderr, "Cannot create temporary file for %s: %s\n",
+                fname, strerror(errno));
+        discard_json_output(depth_user);
+        return -1;
+    }
+
+    if (flock(fd, LOCK_EX) != 0)
+    {
+        saved_errno = errno;
+        close(fd);
+        close(dir_fd);
+        errno = saved_errno;
+        fprintf(stderr, "Cannot lock temporary file for %s: %s\n",
+                fname, strerror(errno));
+        discard_json_output(depth_user);
+        return -1;
+    }
+
+    depth_user->lock_fd = dup(fd);
+    saved_errno = errno;
+    close(dir_fd);
+    errno = saved_errno;
+    if (depth_user->lock_fd < 0)
+    {
+        saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
+        fprintf(stderr, "Cannot retain lock for %s: %s\n",
+                fname, strerror(errno));
+        discard_json_output(depth_user);
+        return -1;
+    }
+
+    depth_user->f = fdopen(fd, "w");
+    if (depth_user->f == NULL)
+    {
+        saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
+        fprintf(stderr, "Cannot open temporary file for %s: %s\n",
+                fname, strerror(errno));
+        discard_json_output(depth_user);
+        return -1;
+    }
+
+    return 0;
+}
+
+/**
+ * Close a completed JSON file and atomically publish it under its final name.
+ *
+ * @param depth_user  Per-depth output context.
+ *
+ * @return Zero on success, -1 on failure.
+ */
+static int
+publish_json_output(depth_ctx_user *depth_user)
+{
+    int saved_errno;
+
+    if (fchmod(fileno(depth_user->f), depth_user->output_mode) != 0)
+    {
+        saved_errno = errno;
+        fprintf(stderr, "Cannot set permissions on %s file: %s\n",
+                depth_user->final_fname, strerror(saved_errno));
+        discard_json_output(depth_user);
+        errno = saved_errno;
+        return -1;
+    }
+
+    if (fclose(depth_user->f) != 0)
+    {
+        saved_errno = errno;
+        depth_user->f = NULL;
+        errno = saved_errno;
+        fprintf(stderr, "Cannot finish %s file: %s\n",
+                depth_user->final_fname, strerror(errno));
+        discard_json_output(depth_user);
+        return -1;
+    }
+    depth_user->f = NULL;
+
+    if (rename(depth_user->tmp_fname, depth_user->final_fname) != 0)
+    {
+        fprintf(stderr, "Cannot publish %s file: %s\n",
+                depth_user->final_fname, strerror(errno));
+        discard_json_output(depth_user);
+        return -1;
+    }
+
+    free(depth_user->tmp_fname);
+    depth_user->tmp_fname = NULL;
+    close(depth_user->lock_fd);
+    depth_user->lock_fd = -1;
+    free(depth_user->final_fname);
+    depth_user->final_fname = NULL;
+
+    return 0;
+}
+
 /* Process format-specific options */
 void rgt_process_cmdline(rgt_gen_ctx_t *ctx, poptContext con, int val)
 {
@@ -140,9 +470,18 @@ alloc_depth_user_data(uint32_t depth)
     depth_user = rgt_xml2fmt_alloc_depth_data(&depth_data, depth, &reused);
 
     if (reused)
+    {
+        discard_json_output(depth_user);
         te_vec_reset(&depth_user->nl_stack);
+    }
     else
+    {
+        depth_user->f = NULL;
+        depth_user->final_fname = NULL;
+        depth_user->tmp_fname = NULL;
+        depth_user->lock_fd = -1;
         depth_user->nl_stack = (te_vec)TE_VEC_INIT(int);
+    }
 
     depth_user->linum = 1;
     depth_user->file_idx = -1;
@@ -279,12 +618,8 @@ RGT_DEF_FUNC(proc_document_start)
                             &multi_opts, ctx, depth_ctx,
                             NULL, NULL, "json");
 
-        if ((depth_user->f = fopen(fname, "w")) == NULL)
-        {
-            fprintf(stderr, "Cannot create %s file: %s\n",
-                    fname, strerror(errno));
+        if (open_json_output(depth_user, fname) != 0)
             abort();
-        }
 
         depth_user->json_ctx =
                 (te_json_ctx_t)TE_JSON_INIT_FILE(depth_user->f);
@@ -303,6 +638,7 @@ free_depth_user_data(void *data)
 {
     depth_ctx_user *depth_user = data;
 
+    discard_json_output(depth_user);
     te_vec_free(&depth_user->nl_stack);
 }
 
@@ -312,23 +648,18 @@ free_depth_user_data(void *data)
 static void
 save_json_tree(void)
 {
-    static FILE *f_tree = NULL;
-    static te_json_ctx_t tree_json_ctx;
+    depth_ctx_user tree_output = { .lock_fd = -1 };
+    te_json_ctx_t tree_json_ctx;
     file_descr *file;
     int *file_idx;
 
     if (te_vec_size(&files) == 0)
         return;
 
-    f_tree = fopen("tree.json", "w");
-    if (f_tree == NULL)
-    {
-        fprintf(stderr, "Cannot create tree.json: %s\n",
-                strerror(errno));
+    if (open_json_output(&tree_output, "tree.json") != 0)
         return;
-    }
 
-    tree_json_ctx = (te_json_ctx_t)TE_JSON_INIT_FILE(f_tree);
+    tree_json_ctx = (te_json_ctx_t)TE_JSON_INIT_FILE(tree_output.f);
     te_json_start_object(&tree_json_ctx);
 
     file = te_vec_get(&files, 0);
@@ -384,7 +715,8 @@ save_json_tree(void)
 
     te_json_end(&tree_json_ctx);
     te_json_end(&tree_json_ctx);
-    fclose(f_tree);
+    if (publish_json_output(&tree_output) != 0)
+        return;
 }
 
 /**
@@ -417,8 +749,8 @@ RGT_DEF_FUNC(proc_document_end)
         maybe_end_entity_list(depth_user);
         root_end(&depth_user->json_ctx);
 
-        fclose(depth_user->f);
-        depth_user->f = NULL;
+        if (publish_json_output(depth_user) != 0)
+            abort();
     }
 
     if (!multi_opts.single_node_match)
@@ -469,12 +801,8 @@ control_node_start(rgt_gen_ctx_t *ctx, rgt_depth_ctx_t *depth_ctx,
     {
         te_json_ctx_t *json_ctx = &depth_user->json_ctx;
 
-        if ((depth_user->f = fopen(fname, "w")) == NULL)
-        {
-            fprintf(stderr, "Cannot create %s file: %s\n",
-                    fname, strerror(errno));
+        if (open_json_output(depth_user, fname) != 0)
             abort();
-        }
 
         depth_user->json_ctx =
                 (te_json_ctx_t)TE_JSON_INIT_FILE(depth_user->f);
@@ -539,18 +867,16 @@ control_node_end(rgt_gen_ctx_t *ctx, rgt_depth_ctx_t *depth_ctx,
                  const char **xml_attrs)
 {
     depth_ctx_user *depth_user = (depth_ctx_user *)depth_ctx->user_data;
-    FILE *f = depth_user->f;
-
     UNUSED(ctx);
     UNUSED(xml_attrs);
 
-    if (f != NULL)
+    if (depth_user->f != NULL)
     {
         maybe_end_entity_list(depth_user);
 
         root_end(&depth_user->json_ctx);
-        fclose(f);
-        depth_user->f = NULL;
+        if (publish_json_output(depth_user) != 0)
+            abort();
     }
 }
 
