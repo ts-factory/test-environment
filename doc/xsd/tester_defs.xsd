@@ -145,6 +145,10 @@
             <xsd:annotation>
                 <xsd:documentation>
                     Objective for the value.
+
+                    ${name} references in this text are replaced with
+                    the values of the arguments and variables of the
+                    current iteration.
                 </xsd:documentation>
             </xsd:annotation>
         </xsd:attribute>
@@ -423,6 +427,10 @@
                 <xsd:annotation>
                     <xsd:documentation>
                         Objective of the test provided by the script.
+
+                        ${name} references in this text are replaced
+                        with the values of the arguments and variables
+                        of the current iteration.
                     </xsd:documentation>
                 </xsd:annotation>
             </xsd:element>
@@ -555,6 +563,10 @@
                 <xsd:annotation>
                     <xsd:documentation>
                         Objective of the session.
+
+                        ${name} references in this text are replaced
+                        with the values of the arguments and variables
+                        of the current iteration.
                     </xsd:documentation>
                 </xsd:annotation>
             </xsd:element>
@@ -776,6 +788,19 @@
                 root package declared in Tester configuration file.
             </xsd:documentation>
         </xsd:annotation>
+        <xsd:choice minOccurs="0" maxOccurs="unbounded">
+            <xsd:element name="objective" type="xsd:string">
+                <xsd:annotation>
+                    <xsd:documentation>
+                        Objective of the test package.
+
+                        ${name} references in this text are replaced
+                        with the values of the arguments and variables
+                        of the current iteration.
+                    </xsd:documentation>
+                </xsd:annotation>
+            </xsd:element>
+        </xsd:choice>
         <xsd:attribute name="name" type="xsd:token">
             <xsd:annotation>
                 <xsd:documentation>
@@ -783,15 +808,6 @@
                 </xsd:documentation>
             </xsd:annotation>
         </xsd:attribute>
-        <xsd:choice minOccurs="0" maxOccurs="unbounded">
-            <xsd:element name="objective" type="xsd:string">
-                <xsd:annotation>
-                    <xsd:documentation>
-                        Objective of the test package.
-                    </xsd:documentation>
-                </xsd:annotation>
-            </xsd:element>
-        </xsd:choice>
     </xsd:complexType>
 
 <!--
