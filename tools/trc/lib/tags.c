@@ -78,6 +78,13 @@ trc_tags_json_to_list(tqh_strings *parsed_tags, char *json_buf)
         return TE_EINVAL;
     }
 
+    /*
+     * json_object_get() and json_array_foreach() below hand out
+     * borrowed references: the enclosing document owns them and
+     * releases them with root.  Releasing one here would leave root
+     * holding a dangling pointer, and its json_decref() would then
+     * free the same object a second time.
+     */
     type = json_object_get(root, "type");
     if (!json_is_string(type))
     {
@@ -88,11 +95,9 @@ trc_tags_json_to_list(tqh_strings *parsed_tags, char *json_buf)
     if (strcmp(json_string_value(type), "trc_tags") != 0)
     {
         ERROR("Wrong MI type");
-        free(type);
         rc = TE_EINVAL;
         goto cleanup;
     }
-    free(type);
 
     version = json_object_get(root, "version");
     if (!json_is_integer(version))
@@ -126,7 +131,6 @@ trc_tags_json_to_list(tqh_strings *parsed_tags, char *json_buf)
             ERROR("Error unpacking trc_tags JSON log message: %s (line %d, "
                   "column %d)",
                   err.text, err.line, err.column);
-            json_decref(tag);
             rc = TE_EFAIL;
             goto cleanup;
         }
@@ -135,8 +139,6 @@ trc_tags_json_to_list(tqh_strings *parsed_tags, char *json_buf)
             te_string_append(&tag_combine, "%s:%s", cur_tag, cur_tag_value);
         else
             te_string_append(&tag_combine, "%s", cur_tag);
-
-        json_decref(tag);
 
         rc = trc_add_tag(parsed_tags, te_string_value(&tag_combine));
         te_string_reset(&tag_combine);
@@ -149,7 +151,6 @@ trc_tags_json_to_list(tqh_strings *parsed_tags, char *json_buf)
 
 cleanup:
     json_decref(root);
-    json_decref(tags);
     te_string_free(&tag_combine);
 
     return rc;
