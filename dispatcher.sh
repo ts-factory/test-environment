@@ -326,6 +326,8 @@ Generic options:
   --log-txt-line-prefix         Add a prefix before every message line in text log.
   --log-junit=<filename>        Name of the file with logs in JUnit format
                                 to be generated.
+  --log-junit-no-warn-err       Exclude WARN and ERROR log messages from JUnit
+                                report.
 
   --no-builder                  Do not build TE and TA.
   --no-nuts-build               Do not build NUTs.
@@ -699,6 +701,7 @@ process_opts()
             --log-txt-detailed-packets) RGT_LOG_TXT_DETAILED_PACKETS=true ;;
             --log-txt-line-prefix) RGT_LOG_TXT_LINE_PREFIX=true ;;
             --log-junit=*)      RGT_LOG_JUNIT="${1#--log-junit=}" ;;
+            --log-junit-no-warn-err) export TE_RGT_JUNIT_EXCLUDE_WARN_ERR=1 ;;
 
             --gdb-tester)   GDB_TESTER=yes ;;
 
