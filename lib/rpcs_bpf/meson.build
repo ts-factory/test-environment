@@ -41,7 +41,10 @@ int main(void) {
 }
 '''.format(xsk_header)
 
-    have_af_xdp = cc.compiles(code_af_xdp_headers, args: te_cflags,
+    have_af_xdp = cc.compiles(code_af_xdp_headers,
+                              args: ['-I' +
+                                     join_paths(meson.build_root(),
+                                                'include')] + te_cflags,
                               name: 'AF_XDP headers usable')
 endif
 
