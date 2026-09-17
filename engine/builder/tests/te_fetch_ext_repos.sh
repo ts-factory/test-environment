@@ -18,6 +18,10 @@ readonly FETCH
 # shellcheck source=test_lib.sh
 . "${SCRIPT_DIR}/test_lib.sh"
 
+# Lock file the fetcher is run with; empty means the default one
+# next to the builder configuration file.
+LOCK=
+
 #######################################
 # Create a bare repository with one commit per extra argument.
 #
@@ -57,28 +61,29 @@ function mk_repo() {
 function mk_conf() {
     local conf="$3"
 
-    cat >"${conf}" <<EOF
+    cat >"${conf}" <<CONF
 TE_BS_EXT_REPOS=" ext"
 TE_BS_EXT_REPO_ext_URL='$1'
 TE_BS_EXT_REPO_ext_REF='$2'
-EOF
+CONF
 }
 
 #######################################
 # Run the fetcher against the work directory.
 # Globals:
 #   FETCH
+#   LOCK
 #   WORK
 # Arguments:
-#   Configuration file to pass to the fetcher.
+#   Options and the configuration file to pass to the fetcher.
 # Outputs:
 #   Writes what the fetcher reported to ${WORK}/out.
 # Returns:
 #   The exit status of the fetcher.
 #######################################
 function run_fetch() {
-    ( cd "${WORK}" && TE_BUILD="${WORK}/build" "${FETCH}" "$@" ) \
-        >"${WORK}/out" 2>&1
+    ( cd "${WORK}" && TE_BUILD="${WORK}/build" "${FETCH}" "$@" \
+        "${LOCK:-${WORK}/builder.conf.lock}" ) >"${WORK}/out" 2>&1
 }
 
 #######################################
@@ -112,6 +117,41 @@ function expect_marker() {
 }
 
 #######################################
+# Check that the lock file records the commit that is checked out.
+# Globals:
+#   GIT
+#   LOCK
+#   WORK
+# Arguments:
+#   URL the record must hold.
+#   Reference the record must hold.
+# Outputs:
+#   Reports the check, see ok() and fail().
+#######################################
+function expect_lock() {
+    local want_url="$1"; shift
+    local want_ref="$1"; shift
+    local file="${LOCK:-${WORK}/builder.conf.lock}"
+    local head
+    local want
+    local got
+
+    if [[ ! -r "${file}" ]] ; then
+        fail "no lock file at ${file}"
+        return
+    fi
+    head="$(${GIT} -C "${WORK}/build/ext-repos/ext" rev-parse HEAD)"
+    want="ext ${want_url} ${want_ref} ${head}"
+    got="$(grep "^ext " "${file}")"
+
+    if [[ "${got}" == "${want}" ]] ; then
+        ok "lock records ${want_ref} at the checked out commit"
+    else
+        fail "lock has [${got}], expected [${want}]"
+    fi
+}
+
+#######################################
 # Check that the output of the fetcher mentions a text.
 # Globals:
 #   WORK
@@ -129,11 +169,11 @@ function expect_out() {
     fi
 }
 
-
 #######################################
 # Run every scenario and report the outcome.
 # Globals:
 #   FETCH
+#   LOCK
 #   WORK
 # Outputs:
 #   Reports each step and each check, see step(), ok() and fail().
@@ -141,10 +181,13 @@ function expect_out() {
 #   This function never returns, see finish().
 #######################################
 function main() {
+    local recorded
+
     [[ -x "${FETCH}" ]] || {
         echo "ERROR: ${FETCH} is not executable" >&2
         exit 1
     }
+
     step "fresh clone checks out the requested tag"
     mk_repo "${WORK}/a.git" first second
     mk_conf "${WORK}/a.git" v1 "${WORK}/conf"
@@ -222,6 +265,58 @@ function main() {
     rm -f "${WORK}/build/ext-repos/ext/new_source.c"
 
 
+    step "a branch ref is recorded on the first resolve"
+    mk_conf "${WORK}/d.git" main "${WORK}/conf-d-main"
+    run_fetch "${WORK}/conf-d-main" \
+        || fail "fetcher failed: $(cat "${WORK}/out")"
+    expect_marker beta
+    if [[ -f "${WORK}/builder.conf.lock" ]] ; then
+        ok "lock file created"
+    else
+        fail "lock file was not created"
+    fi
+    expect_lock "${WORK}/d.git" main
+
+
+    step "a recorded branch does not follow the tip"
+    echo gamma >"${WORK}/d.git.work/marker.txt"
+    ${GIT} -C "${WORK}/d.git.work" commit -q -am gamma
+    ${GIT} -C "${WORK}/d.git.work" push -q "${WORK}/d.git" HEAD:refs/heads/main
+    run_fetch "${WORK}/conf-d-main" \
+        || fail "fetcher failed: $(cat "${WORK}/out")"
+    expect_marker beta
+    if grep -q "fetching" "${WORK}/out" ; then
+        fail "a recorded build went to the network: $(cat "${WORK}/out")"
+    else
+        ok "no fetch was made"
+    fi
+
+
+    step "--update-external moves the record to the current tip"
+    if run_fetch --update "${WORK}/conf-d-main" ; then
+        expect_marker gamma
+        expect_out "updating"
+    else
+        fail "update failed: $(cat "${WORK}/out")"
+    fi
+
+
+    step "an update with nothing new reports that the ref is up to date"
+    run_fetch --update "${WORK}/conf-d-main" \
+        || fail "update failed: $(cat "${WORK}/out")"
+    expect_marker gamma
+    expect_out "already up to date"
+
+
+    step "changing the ref in the configuration re-resolves it"
+    mk_conf "${WORK}/d.git" v1 "${WORK}/conf-d-back"
+    run_fetch "${WORK}/conf-d-back" \
+        || fail "fetcher failed: $(cat "${WORK}/out")"
+    expect_marker alpha
+    expect_out "declaration changed"
+    expect_lock "${WORK}/d.git" v1
+
+
     step "ref equal to the default branch tip still materializes the tree"
     # A --no-checkout clone has HEAD at the tip, so this is the one case
     # where HEAD need not move and the script could skip the checkout
@@ -231,6 +326,66 @@ function main() {
     run_fetch "${WORK}/conf-e" || fail "fetcher failed: $(cat "${WORK}/out")"
     expect_marker only
 
+
+    step "a changed URL costs no fetch while the record is available"
+    # A repository moves while the commit already built sits in the
+    # clone: there is nothing to resolve, so the script has no reason
+    # to reach the new origin
+    mk_repo "${WORK}/g.git" solo
+    mk_conf "${WORK}/g.git" v1 "${WORK}/conf-g"
+    LOCK="${WORK}/moved.lock"
+    rm -rf "${WORK}/build/ext-repos/ext"
+    run_fetch "${WORK}/conf-g" || fail "fetcher failed: $(cat "${WORK}/out")"
+    expect_marker solo
+
+    # The same repository at a second URL, which is then made unusable
+    cp -R "${WORK}/g.git" "${WORK}/g2.git"
+    mk_conf "${WORK}/g2.git" v1 "${WORK}/conf-g2"
+    mv "${WORK}/g2.git" "${WORK}/g2.git.unreachable"
+    python3 - "${WORK}/moved.lock" "${WORK}/g2.git" <<'PYEOF'
+import sys
+lock, url = sys.argv[1], sys.argv[2]
+lines = open(lock).read().splitlines()
+out = []
+for l in lines:
+    f = l.split()
+    if len(f) == 4 and f[0] == 'ext':
+        f[1] = url
+        l = ' '.join(f)
+    out.append(l)
+open(lock, 'w').write('\n'.join(out) + '\n')
+PYEOF
+    if run_fetch "${WORK}/conf-g2" ; then
+        ok "the build succeeded without touching the new origin"
+        expect_marker solo
+    else
+        fail "the build went to the unreachable origin: $(cat "${WORK}/out")"
+    fi
+    expect_out "origin changed"
+    LOCK=
+
+
+    step "a clean build reproduces the recorded commit"
+    # A fresh CI worker: no build tree, only the suite with its lock
+    # file, while upstream has moved on since
+    mk_repo "${WORK}/f.git" one
+    mk_conf "${WORK}/f.git" main "${WORK}/conf-f"
+    LOCK="${WORK}/clean.lock"
+    rm -rf "${WORK}/build"
+    run_fetch "${WORK}/conf-f" || fail "fetcher failed: $(cat "${WORK}/out")"
+    expect_marker one
+    recorded="$(grep '^ext ' "${LOCK}" | awk '{print $4}')"
+
+    echo two >"${WORK}/f.git.work/marker.txt"
+    ${GIT} -C "${WORK}/f.git.work" commit -q -am two
+    ${GIT} -C "${WORK}/f.git.work" push -q "${WORK}/f.git" HEAD:refs/heads/main
+
+    rm -rf "${WORK}/build"
+    run_fetch "${WORK}/conf-f" || fail "fetcher failed: $(cat "${WORK}/out")"
+    expect_marker one
+    expect_eq "the recorded commit after a wiped build tree" \
+        "$(grep '^ext ' "${LOCK}" | awk '{print $4}')" "${recorded}"
+    LOCK=
 
 
     finish

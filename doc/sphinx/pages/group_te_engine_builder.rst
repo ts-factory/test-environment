@@ -195,9 +195,31 @@ The TE_EXT_REPO directive declares an external git repository with TE libraries 
 
 Before it builds the platforms, the Builder clones the repository into ${TE_BUILD}/ext-repos/[repository name] and checks out the requested reference (tag, commit hash or branch name) with a detached HEAD.
 
-The checkout directory outlives a build, so the Builder compares the declared URL with the origin of the existing clone. If the repository has moved, the Builder warns, points origin at the new URL, prunes the stale refs of the previous origin and fetches from the new one, rather than build the code of the old repository.
+A build does not move to a newer commit on its own. The Builder records the commit a reference resolved to in a lock file next to the Builder configuration file (conf/builder.conf.lock for conf/builder.conf), and each later build checks out the recorded commit, wherever the reference points upstream by then. This holds for branch names too: the Builder resolves a branch once, and the build changes only when the configuration changes. Each build prints the commit in use.
+
+The lock file belongs to the test suite; keep it under version control together with the Builder configuration file. A machine that has not built the suite before, such as a clean CI worker, checks out the suite, reads the recorded commits and builds the sources the previous run built. You may wipe a build tree at any time without a change to the commits in use.
+
+Moving to a newer commit is an explicit action: run dispatcher.sh with the --update-external option:
+
+.. ref-code-block:: none
+
+	./dispatcher.sh --update-external ...
+
+It re-resolves the references, rewrites the lock file and reports what moved and where. Commit the updated lock file along with the other changes of the suite, so that the rest of the team builds what you tested. A changed URL or reference in the Builder configuration file or in the catalog re-resolves that repository too, since that is a request for a different commit.
+
+You can also obtain the repositories on their own, without a build:
+
+.. ref-code-block:: none
+
+	./dispatcher.sh --fetch-external-only ...
+
+Use it where the build itself cannot authenticate to the git server, such as a container or a CI worker that gets no credentials on purpose. Run this step where the credentials are; the build that follows finds the sources locally and does not reach the network. With --update-external it moves the lock file on without a full build.
+
+The checkout directory outlives a build, so the Builder compares the declared URL with the origin of the existing clone. If the repository has moved, the Builder warns and points origin at the new URL, rather than fetch from the old one. It fetches and prunes the refs only when it has to resolve a reference against the new origin; a recorded commit that the clone has builds without a fetch, which matters when the new origin needs credentials the build does not have.
 
 The Builder keeps sources you edit in the checkout directory, so that you can debug an external library without leaving the build tree. While the requested commit is checked out, it warns and builds your local modifications as they are (tracked changes and untracked files; files matched by .gitignore do not count). Moving the checkout to another commit over such modifications is an error, and the error names the git command that discards them.
+
+The Builder reaches the network for the first clone of a repository and for a recorded commit the local clone does not have. A build that has both makes no network access.
 
 Each declared library is a subdirectory of the repository (with an empty list, the Builder treats the repository root as one library named after the repository). The Builder appends the libraries to the platform library list and copies their sources into the platform build workspace, so they build as subdirectories of ${TE_BASE}/lib. A library must therefore contain a meson.build that follows the contract of the ${TE_BASE}/lib/meson.build subdirectories: append its files to 'sources' and 'headers', list TE dependencies in 'te_libs', and so on.
 

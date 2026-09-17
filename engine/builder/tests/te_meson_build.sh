@@ -13,9 +13,10 @@
 #
 # The test compiles nothing. Its checks stop at the inputs of the
 # build: the variables a configuration turns into, where the sources
-# are checked out and which options reach meson. It does not check
-# that a library from such a repository links, or that a constructor
-# registered with TE_RCF_PCH_CONF_EXT() runs in an agent.
+# are checked out, what the lock file records and which options reach
+# meson. It does not check that a library from such a repository
+# links, or that a constructor registered with TE_RCF_PCH_CONF_EXT()
+# runs in an agent.
 #
 # Usage: ./te_meson_build.sh
 
@@ -38,6 +39,10 @@ readonly FETCH
 # TE_HOST, and that is what TE_EXT_REPO binds libraries to when no
 # platform is named.
 readonly TEST_PLATFORM=default
+
+# The file that records the fetched repositories.
+LOCK="${WORK}/builder.conf.lock"
+readonly LOCK
 
 # The catalog handed to the build, if any (dispatcher.sh --external).
 CATALOG=
@@ -232,9 +237,11 @@ function expect_file() {
 #######################################
 # Fetch the repositories of the processed configuration.
 #
-# The sources land in ${WORK}/build.
+# The sources land in ${WORK}/build and the commits are recorded in
+# ${LOCK}.
 # Globals:
 #   FETCH
+#   LOCK
 #   WORK
 # Outputs:
 #   Writes what the fetcher reported to ${WORK}/out and reports a
@@ -244,7 +251,7 @@ function expect_file() {
 #######################################
 function run_fetch() {
     if ( cd "${WORK}" && TE_BUILD="${WORK}/build" \
-            "${FETCH}" "${WORK}/processed" ) \
+            "${FETCH}" "${WORK}/processed" "${LOCK}" ) \
             >"${WORK}/out" 2>&1 ; then
         return 0
     fi
@@ -281,6 +288,7 @@ function agent_options() {
 # Globals:
 #   CATALOG
 #   FETCH
+#   LOCK
 #   MESON_BUILD
 #   TEST_PLATFORM
 #   WORK
@@ -291,6 +299,7 @@ function agent_options() {
 #######################################
 function main() {
     local bare="${WORK}/ext.git"
+    local head_commit
     local lib_src="${WORK}/build/ext-repos/extselftest/tapi_ext_selftest"
     local agent_src="${WORK}/build/ext-repos/extselftest/ta_ext_selftest"
     local want
@@ -305,6 +314,7 @@ function main() {
     done
 
     mk_ext_repo "${bare}"
+    head_commit="$(${GIT} -C "${bare}" rev-parse 'v1^{commit}')"
 
     step "TE_EXT_REPO declares the repository, its library and its agent"
     mk_conf <<EOF
@@ -402,6 +412,8 @@ EOF
         expect_file "the library sources" "${lib_src}/tapi_ext_selftest.c"
         expect_file "the library build file" "${lib_src}/meson.build"
         expect_file "the agent type sources" "${agent_src}/ta_ext_selftest.c"
+        expect_eq "the lock record" "$(grep -v '^#' "${LOCK}")" \
+                  "extselftest ${bare} v1 ${head_commit}"
     fi
 
     step "The agent options handed to meson name the agent and its libraries"

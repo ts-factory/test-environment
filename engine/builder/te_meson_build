@@ -14,6 +14,16 @@ SCRIPT_DIR="$(dirname "$0")"
 
 with_config="$1"
 
+# The lock file with the commits of external repositories lives next
+# to the builder configuration file, where the test suite keeps it
+# under version control. Resolve it while the current directory is
+# still the run directory: the build runs from ${TE_BUILD}.
+ext_repos_lock=
+if [[ -n "${with_config}" && -e "${with_config}" ]] ; then
+    ext_repos_lock="$(cd "$(dirname "${with_config}")" && pwd)"
+    ext_repos_lock="${ext_repos_lock}/$(basename "${with_config}").lock"
+fi
+
 # List of all available TAD protocols
 TAD_PROTOCOLS_ALL="arp"
 TAD_PROTOCOLS_ALL+=" atm"
@@ -1102,10 +1112,21 @@ build_all () {
 
     # Fetch the repositories declared with TE_EXT_REPO before the
     # platforms are built: the library lists name their sources,
-    # and te_cross_build_meson copies them into the workspaces.
+    # and te_cross_build_meson copies them into the workspaces. The
+    # lock file next to the builder configuration file records the
+    # commits, where the test suite keeps it under version control.
+    local ext_repos_update=
+    [[ "${TE_EXT_REPOS_UPDATE:-}" != yes ]] || ext_repos_update=--update
     [[ -z "${TE_BS_EXT_REPOS}" ]] \
-        || ${SCRIPT_DIR}/te_fetch_ext_repos builder.conf.processed \
+        || ${SCRIPT_DIR}/te_fetch_ext_repos ${ext_repos_update} \
+               builder.conf.processed "${ext_repos_lock}" \
         || error "Failed to fetch external repositories"
+
+    if [[ "${TE_EXT_REPOS_FETCH_ONLY:-}" == yes ]] ; then
+        echo "External repositories are ready;" \
+             "--fetch-external-only builds nothing"
+        return 0
+    fi
 
     process_platforms
 
