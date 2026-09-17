@@ -177,6 +177,78 @@ Please note that we do not specify value for source directory parameter, which m
 
 
 
+.. _doxid-group__te__engine__builder_1te_engine_builder_conf_file_te_ext_repo:
+
+TE_EXT_REPO
++++++++++++
+
+.. ref-code-block:: none
+
+	TE_EXT_REPO([repository name],
+	            [platform name],
+	            [git URL],
+	            [git reference],
+	            [list of libraries],
+	            [list of agent types])
+
+The TE_EXT_REPO directive declares an external git repository with TE libraries (TAPI, agent-side configuration subtrees, RPC implementations) that live outside the TE source tree.
+
+Before it builds the platforms, the Builder clones the repository into ${TE_BUILD}/ext-repos/[repository name] and checks out the requested reference (tag, commit hash or branch name) with a detached HEAD.
+
+The checkout directory outlives a build, so the Builder compares the declared URL with the origin of the existing clone. If the repository has moved, the Builder warns, points origin at the new URL, prunes the stale refs of the previous origin and fetches from the new one, rather than build the code of the old repository.
+
+The Builder keeps sources you edit in the checkout directory, so that you can debug an external library without leaving the build tree. While the requested commit is checked out, it warns and builds your local modifications as they are (tracked changes and untracked files; files matched by .gitignore do not count). Moving the checkout to another commit over such modifications is an error, and the error names the git command that discards them.
+
+Each declared library is a subdirectory of the repository (with an empty list, the Builder treats the repository root as one library named after the repository). The Builder appends the libraries to the platform library list and copies their sources into the platform build workspace, so they build as subdirectories of ${TE_BASE}/lib. A library must therefore contain a meson.build that follows the contract of the ${TE_BASE}/lib/meson.build subdirectories: append its files to 'sources' and 'headers', list TE dependencies in 'te_libs', and so on.
+
+By default the Builder builds an external library as a static agent-side library. The library may override this in its meson.build:
+
+* 'build_lib_shared = true' / 'build_lib_static = false' together with 'install_lib = install_dev' turn it into an engine-side shared library (e.g. a TAPI used by test suites);
+
+* 'link_whole = true' makes agents link the whole library, which constructor-based registration needs (see below).
+
+For example, a repository with a TAPI library and an agent library:
+
+.. ref-code-block:: none
+
+	TE_EXT_REPO([wifi], [], [https://example.com/te-wifi.git], [v1.2.0],
+	            [tapi_cfg_wifi ta_wifi])
+	TE_EXT_REPO([wifi], [linux64], [https://example.com/te-wifi.git], [v1.2.0],
+	            [ta_wifi])
+
+.. ref-code-block:: none
+
+An agent-side library registers its configuration subtree through the rcfpch registry, without a change to the Test Agent sources (the library must set 'link_whole = true'):
+
+.. ref-code-block:: none
+
+	#include "rcf_pch_conf_ext.h"
+
+	static te_errno
+	my_conf_init(void)
+	{
+	    return rcf_pch_add_node("/agent", &node_my_subtree);
+	}
+
+	TE_RCF_PCH_CONF_EXT(my_conf_init);
+
+The agent sets up the built-in subtrees before it initializes any extension. The extensions themselves run in the order of their constructors, and that order depends on the linker and on the way the libraries are linked, so extensions must not depend on each other or on running first or last.
+
+This is the agent half of a configuration subtree. As with any subtree, the Configurator has to know the objects before a test can touch them, so the external library must also ship the model, a :ref:`Configurator <doxid-group__te__engine__conf>` YAML file that registers the same OIDs, and the test suite has to include it in its Configurator configuration file. Tests cannot see a subtree that the agent adds and the engine side does not register.
+
+The agent logs the number of registered extensions at the start of the configuration initialization. Zero where you expected some means, as a rule, that a library was linked without 'link_whole = true' and the linker dropped the object file with the constructor.
+
+Add RPC definitions shipped in the repository with the usual TE_LIB_PARMS directive for rpcxdr; reference them relative to ${TE_BASE}/lib/rpcxdr, so that the path stays valid inside build workspaces (the workspace holds external library sources under lib/[library name]):
+
+.. ref-code-block:: none
+
+	TE_LIB_PARMS([rpcxdr], [linux64], [],
+	             [--with-rpcdefs=../ta_wifi/wifi_rpc.x.m4])
+
+
+
+
+
 .. _doxid-group__te__engine__builder_1te_engine_builder_conf_file_te_ta_type:
 
 TE_TA_TYPE

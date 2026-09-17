@@ -213,6 +213,99 @@ eval `echo TE_BS_LIB_${PLATFORM}_$1_CFLAGS=\"$6\"`
 eval `echo TE_BS_LIB_${PLATFORM}_$1_LDFLAGS=\"$7\"`
 ])
 
+dnl Declares an external git repository that provides TE libraries.
+dnl
+dnl The repository is fetched by the Builder (see te_fetch_ext_repos)
+dnl into ${TE_BUILD}/ext-repos/<name> before platforms are built.
+dnl The declared libraries are added to the platform library list and
+dnl their sources are copied into the platform build workspace by
+dnl te_cross_build_meson, so they build as subdirectories of
+dnl ${TE_BASE}/lib.
+dnl
+dnl Each declared library must be a directory with a meson.build
+dnl following the contract of ${TE_BASE}/lib/meson.build subdirectories
+dnl (set 'sources', 'headers', 'te_libs', etc.; it may override
+dnl 'build_lib_shared'/'build_lib_static'/'install_lib'/'link_whole'
+dnl to build an engine-side shared library or to link into agents
+dnl with link_whole).
+dnl
+dnl May be called several times for the same repository to add its
+dnl libraries to different platforms; URL and ref must be the same
+dnl in all calls.
+dnl
+dnl Parameters:
+dnl       repository name (should start with a letter and contain
+dnl           only letters, digits and underscores)
+dnl       platform name; may be empty for host platform
+dnl       git URL (anything accepted by git clone: https, ssh,
+dnl           local path)
+dnl       git reference to check out: tag, commit hash or branch name
+dnl           (pin a tag or commit for reproducible builds)
+dnl       list of libraries to take from the repository: names of
+dnl           its subdirectories; if empty, the repository root
+dnl           itself is treated as a single library named after
+dnl           the repository
+dnl
+define([TE_EXT_REPO],
+[[
+EXTREPO="$1"
+case "$EXTREPO" in
+     [^a-zA-Z]*)
+        TE_BS_CONF_ERR="external repo name does not start with a letter" ;
+        break ;
+        ;;
+     *[^a-zA-Z0-9_]*)
+        TE_BS_CONF_ERR="external repo name contains illegal characters" ;
+        break ;
+        ;;
+esac
+PLATFORM="$2"
+if test -z "$PLATFORM" ; then
+    PLATFORM=${TE_HOST}
+fi
+REPO_URL="$3"
+REPO_REF="$4"
+REPO_LIBS="$5"
+if test -z "$REPO_URL" -o -z "$REPO_REF" ; then
+    TE_BS_CONF_ERR="external repo ${EXTREPO}: URL and ref are mandatory" ;
+    break ;
+fi
+REPO_URL_VAR="TE_BS_EXT_REPO_${EXTREPO}_URL"
+if test -n "${!REPO_URL_VAR}" ; then
+    if test "${!REPO_URL_VAR}" != "$REPO_URL" ; then
+        TE_BS_CONF_ERR="external repo ${EXTREPO} is declared twice"
+        TE_BS_CONF_ERR="${TE_BS_CONF_ERR} with different URLs" ;
+        break ;
+    fi
+    REPO_REF_VAR="TE_BS_EXT_REPO_${EXTREPO}_REF"
+    if test "${!REPO_REF_VAR}" != "$REPO_REF" ; then
+        TE_BS_CONF_ERR="external repo ${EXTREPO} is declared twice"
+        TE_BS_CONF_ERR="${TE_BS_CONF_ERR} with different refs" ;
+        break ;
+    fi
+fi
+case " ${TE_BS_EXT_REPOS} " in
+    *" ${EXTREPO} "*) ;;
+    *) TE_BS_EXT_REPOS="${TE_BS_EXT_REPOS} ${EXTREPO}" ;;
+esac
+declare "TE_BS_EXT_REPO_${EXTREPO}_URL"="$REPO_URL"
+declare "TE_BS_EXT_REPO_${EXTREPO}_REF"="$REPO_REF"
+REPO_SRC="${TE_BUILD}/ext-repos/${EXTREPO}"
+REPO_ROOT_IS_LIB=
+if test -z "$REPO_LIBS" ; then
+    REPO_LIBS="$EXTREPO"
+    REPO_ROOT_IS_LIB=yes
+fi
+for REPO_LIB in $REPO_LIBS ; do
+    if test -n "$REPO_ROOT_IS_LIB" ; then
+        REPO_LIB_SRC="${REPO_SRC}"
+    else
+        REPO_LIB_SRC="${REPO_SRC}/${REPO_LIB}"
+    fi
+    eval "${PLATFORM}_LIBS=\"\${${PLATFORM}_LIBS} ${REPO_LIB}\""
+    declare "TE_BS_LIB_${PLATFORM}_${REPO_LIB}_SOURCES"="$REPO_LIB_SRC"
+done
+]])
 
 dnl Declares the list of engine applications to be built by "make all" command.
 dnl May be called only once.
