@@ -245,6 +245,9 @@ dnl       list of libraries to take from the repository: names of
 dnl           its subdirectories; if empty, the repository root
 dnl           itself is treated as a single library named after
 dnl           the repository
+dnl       list of agent types provided by the repository: names of
+dnl           its subdirectories (may be empty); reference such an
+dnl           agent type in the sources parameter of TE_TA_TYPE
 dnl
 define([TE_EXT_REPO],
 [[
@@ -292,7 +295,7 @@ declare "TE_BS_EXT_REPO_${EXTREPO}_URL"="$REPO_URL"
 declare "TE_BS_EXT_REPO_${EXTREPO}_REF"="$REPO_REF"
 REPO_SRC="${TE_BUILD}/ext-repos/${EXTREPO}"
 REPO_ROOT_IS_LIB=
-if test -z "$REPO_LIBS" ; then
+if test -z "$REPO_LIBS" -a -z "$6" ; then
     REPO_LIBS="$EXTREPO"
     REPO_ROOT_IS_LIB=yes
 fi
@@ -304,6 +307,25 @@ for REPO_LIB in $REPO_LIBS ; do
     fi
     eval "${PLATFORM}_LIBS=\"\${${PLATFORM}_LIBS} ${REPO_LIB}\""
     declare "TE_BS_LIB_${PLATFORM}_${REPO_LIB}_SOURCES"="$REPO_LIB_SRC"
+done
+REPO_AGENTS="$6"
+for REPO_AGENT in $REPO_AGENTS ; do
+    case "$REPO_AGENT" in
+        [^a-zA-Z]*|*[^a-zA-Z0-9_]*)
+            TE_BS_CONF_ERR="external repo ${EXTREPO}: bad agent"
+            TE_BS_CONF_ERR="${TE_BS_CONF_ERR} type name ${REPO_AGENT}" ;
+            break 2 ;
+            ;;
+    esac
+    REPO_AGENT_SRC_VAR="TE_BS_EXT_AGENT_${REPO_AGENT}_SOURCES"
+    if test -n "${!REPO_AGENT_SRC_VAR}" -a \
+            "${!REPO_AGENT_SRC_VAR}" != "${REPO_SRC}/${REPO_AGENT}" ; then
+        TE_BS_CONF_ERR="external agent type ${REPO_AGENT} is"
+        TE_BS_CONF_ERR="${TE_BS_CONF_ERR} provided by more than"
+        TE_BS_CONF_ERR="${TE_BS_CONF_ERR} one repository" ;
+        break 2 ;
+    fi
+    declare "$REPO_AGENT_SRC_VAR"="${REPO_SRC}/${REPO_AGENT}"
 done
 ]])
 
@@ -317,6 +339,10 @@ dnl catalog manages the versions in one place.
 dnl
 dnl May be called several times to add libraries of the same
 dnl repository to different platforms.
+dnl
+dnl Agent types listed in the catalog ('agents' key) become available
+dnl automatically when the repository is used: reference them in the
+dnl sources parameter of TE_TA_TYPE.
 dnl
 dnl Parameters:
 dnl       repository name as declared in the catalog
@@ -344,8 +370,9 @@ if test -z "$REPO_LIBS" ; then
     REPO_LIBS="${!REPO_ALL_LIBS_VAR}"
 fi
 REPO_SRC="${TE_BUILD}/ext-repos/${EXTREPO}"
+REPO_AGENTS_VAR="TE_BS_EXT_REPO_${EXTREPO}_AGENTS"
 REPO_ROOT_IS_LIB=
-if test -z "$REPO_LIBS" ; then
+if test -z "$REPO_LIBS" -a -z "${!REPO_AGENTS_VAR}" ; then
     REPO_LIBS="$EXTREPO"
     REPO_ROOT_IS_LIB=yes
 fi
@@ -367,6 +394,18 @@ for REPO_LIB in $REPO_LIBS ; do
     fi
     eval "${PLATFORM}_LIBS=\"\${${PLATFORM}_LIBS} ${REPO_LIB}\""
     declare "TE_BS_LIB_${PLATFORM}_${REPO_LIB}_SOURCES"="$REPO_LIB_SRC"
+done
+REPO_AGENTS_VAR="TE_BS_EXT_REPO_${EXTREPO}_AGENTS"
+for REPO_AGENT in ${!REPO_AGENTS_VAR} ; do
+    REPO_AGENT_SRC_VAR="TE_BS_EXT_AGENT_${REPO_AGENT}_SOURCES"
+    if test -n "${!REPO_AGENT_SRC_VAR}" -a \
+            "${!REPO_AGENT_SRC_VAR}" != "${REPO_SRC}/${REPO_AGENT}" ; then
+        TE_BS_CONF_ERR="external agent type ${REPO_AGENT} is"
+        TE_BS_CONF_ERR="${TE_BS_CONF_ERR} provided by more than"
+        TE_BS_CONF_ERR="${TE_BS_CONF_ERR} one repository" ;
+        break 2 ;
+    fi
+    declare "$REPO_AGENT_SRC_VAR"="${REPO_SRC}/${REPO_AGENT}"
 done
 case " ${TE_BS_EXT_REPOS} " in
     *" ${EXTREPO} "*) ;;
@@ -491,12 +530,24 @@ then
 fi
 ]
 SOURCES=$3
-if test -z "$SOURCES" ; then
+[
+EXT_AGENT_SRC=
+case "$SOURCES" in
+    ""|*[^a-zA-Z0-9_]*) ;;
+    *)
+        EXT_AGENT_SRC_VAR="TE_BS_EXT_AGENT_${SOURCES}_SOURCES"
+        EXT_AGENT_SRC="${!EXT_AGENT_SRC_VAR}"
+        ;;
+esac
+]
+if test -n "$EXT_AGENT_SRC" ; then
+    SOURCES=$EXT_AGENT_SRC ;
+elif test -z "$SOURCES" ; then
     SOURCES=${TE_BASE}/agents/$1 ;
 elif test "${SOURCES:0:1}" != "/" ; then
     SOURCES=${TE_BASE}/agents/$SOURCES ;
 fi
-if ! test -d "$SOURCES" ; then
+if test -z "$EXT_AGENT_SRC" && ! test -d "$SOURCES" ; then
     TMP=${TE_BASE}/lib/`basename $SOURCES`
     if test -d "$TMP" ; then
         SOURCES=$TMP

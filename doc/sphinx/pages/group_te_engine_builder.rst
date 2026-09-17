@@ -216,7 +216,37 @@ For example, a repository with a TAPI library and an agent library:
 	TE_EXT_REPO([wifi], [linux64], [https://example.com/te-wifi.git], [v1.2.0],
 	            [ta_wifi])
 
+A repository may also provide agent types (directories with a standalone meson.build, like the subdirectories of ${TE_BASE}/agents). List them in the sixth parameter (or in the 'agents' key of the catalog, see TE_EXT_REPO_USE) and name the directory in the sources parameter of TE_TA_TYPE:
+
 .. ref-code-block:: none
+
+	TE_EXT_REPO([my_agents], [p64], [https://example.com/te-agents.git],
+	            [v2.0], [], [riscv_agent])
+	TE_TA_TYPE([riscv64], [p64], [riscv_agent], [], [], [], [], [tools])
+
+The Builder passes the agent types to meson in two array options, both keyed by the agent directory: 'agent-ext-names' holds one '<agent-dir>:<ta-name>' entry per agent, and 'agent-ext-libs' one '<agent-dir>:<lib>' entry per extra library (the eighth TE_TA_TYPE parameter). The platform is a plain string option 'agent-ext-platform', as for the built-in agent types: the Builder configures meson once per platform, so the external agents of one invocation share it. The agent's meson.build picks its own entries and builds itself, for example:
+
+.. ref-code-block:: none
+
+	ext_name = ''
+	foreach e : get_option('agent-ext-names')
+	    f = e.split(':')
+	    if f[0] == 'riscv_agent'
+	        ext_name = f[1]
+	    endif
+	endforeach
+	ext_deps = []
+	foreach e : get_option('agent-ext-libs')
+	    f = e.split(':')
+	    if f[0] == 'riscv_agent'
+	        ext_deps += [ get_variable('dep_lib_static_' + f[1]) ]
+	    endif
+	endforeach
+	platform = get_option('agent-ext-platform')
+	executable('ta', files('main.c'), install: true,
+	           install_dir: join_paths(get_option('agentsdir'), ext_name),
+	           c_args: [ '-DTE_AGT_PLATFORM="' + platform + '"' ],
+	           dependencies: ext_deps)
 
 An agent-side library registers its configuration subtree through the rcfpch registry, without a change to the Test Agent sources (the library must set 'link_whole = true'):
 
@@ -285,7 +315,7 @@ Catalog format:
 	    agents:
 	      - riscv_agent
 
-'libs' lists the libraries the repository provides; it may be omitted, and the Builder then treats the repository root as one library named after the repository. A parser built into the Builder reads the catalog, so TE builds without a YAML library. The parser understands the block subset shown above and refuses the rest (flow collections, anchors, tags, block scalars, multiple documents), so that a catalog reads the same way here and in a full YAML reader.
+'libs' lists the libraries the repository provides; it may be omitted, and the Builder then treats the repository root as one library named after the repository, unless 'agents' is given. 'agents' lists agent type directories; TE_TA_TYPE can name them once the repository is used (see TE_EXT_REPO for the agent meson.build contract). A parser built into the Builder reads the catalog, so TE builds without a YAML library. The parser understands the block subset shown above and refuses the rest (flow collections, anchors, tags, block scalars, multiple documents), so that a catalog reads the same way here and in a full YAML reader.
 
 With the catalog above, a Builder configuration file may contain:
 

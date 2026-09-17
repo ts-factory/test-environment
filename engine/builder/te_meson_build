@@ -494,6 +494,79 @@ process_agent_proxy() {
     }
 }
 
+#######################################
+# Check that a value may be carried by an entry of the external
+# agent options.
+#
+# ',' separates the entries and ':' the two fields of one, so a
+# value holding either would be read back as two.
+# Arguments:
+#   TA name, for the diagnostics.
+#   Description of the value being checked.
+#   Value to check.
+# Outputs:
+#   Writes the diagnostics to stderr if the value is not usable.
+# Returns:
+#   0 if the value is usable, does not return otherwise.
+#######################################
+check_agent_ext_field() {
+    local ta="$1"; shift
+    local what="$1"; shift
+    local value="$1"; shift
+
+    case "${value}" in
+        *[:,]*)
+            error "Agent ${ta}: ${what} '${value}' contains a character" \
+                  "reserved by the external agent options (':' or ',')" ;;
+    esac
+}
+
+#######################################
+# Process an agent of a type an external repository provides.
+#
+# The agent is named in agent-ext-names and its extra libraries are
+# listed in agent-ext-libs, both keyed by the agent directory. The
+# platform is a scalar option, as it is for the built-in agent
+# types: the Builder configures meson once per platform, so the
+# external agents of one invocation share it.
+# Globals:
+#   agent_ext_platform
+#   agent_ext_names
+#   agent_ext_libs
+# Arguments:
+#   TA name.
+#   Prefix of the TE_BS_TA_* variables of the agent.
+#   Agent type directory, as the repository provides it.
+# Returns:
+#   0, or does not return if a name would break the encoding.
+#######################################
+process_agent_ext() {
+    local ta="$1"; shift
+    local pfx="$1"; shift
+    local ta_dir="$1"; shift
+    local libs_var="${pfx}LIBS"
+    local ta_platform="${pfx}PLATFORM"
+    local l
+
+    check_agent_ext_field "${ta}" "agent directory" "${ta_dir}"
+    check_agent_ext_field "${ta}" "TA name" "${ta}"
+
+    agent_ext_platform="${!ta_platform}"
+
+    agent_ext_names="${agent_ext_names}${agent_ext_names:+,}${ta_dir}:${ta}"
+
+    # Word splitting also normalizes the whitespace of the list: it
+    # may contain tabs, newlines or repeated spaces
+    for l in ${!libs_var} ; do
+        check_agent_ext_field "${ta}" "library name" "${l}"
+        agent_ext_libs="${agent_ext_libs}${agent_ext_libs:+,}${ta_dir}:${l}"
+    done
+
+    # The libraries are handed to meson above, so keep
+    # process_parameters() from warning about an unsupported list
+    printf -v "${libs_var}" '%s' ''
+}
+
 process_agent() {
     local p="$1"; shift
     local ta="$1"; shift
@@ -511,6 +584,11 @@ process_agent() {
         unix)   process_agent_unix "${ta}" "${pfx}" ;;
         powerctl|power-ctl) process_agent_powerctl "${ta}" "${pfx}" ;;
         proxy) process_agent_proxy "${ta}" "${pfx}" ;;
+        *)
+            local ext_src_var="TE_BS_EXT_AGENT_${ta_src}_SOURCES"
+            [[ -z "${!ext_src_var}" ]] \
+                || process_agent_ext "${ta}" "${pfx}" "${ta_src}"
+            ;;
     esac
 
     process_parameters "${pfx}" "${msg}"
@@ -665,10 +743,20 @@ process_platform() {
         meson_args="${meson_args} -Dtad-protocols=\"${tad_protocols}\""
 
     local build_agents=
+    local agent_ext_platform=
+    local agent_ext_names=
+    local agent_ext_libs=
     for ta in ${TE_BS_TA} ; do
         local platform="TE_BS_TA_${ta}_PLATFORM"
         test "${!platform}" != "${p}" || process_agent "${p}" "${ta}"
     done
+
+    [[ -z "${agent_ext_platform}" ]] \
+        || meson_args="${meson_args} -Dagent-ext-platform=${agent_ext_platform}"
+    [[ -z "${agent_ext_names}" ]] \
+        || meson_args="${meson_args} -Dagent-ext-names=\"${agent_ext_names}\""
+    [[ -z "${agent_ext_libs}" ]] \
+        || meson_args="${meson_args} -Dagent-ext-libs=\"${agent_ext_libs}\""
 
     test -z "${use_sniffers}" ||
         meson_args="${meson_args} -Dsniffers=\"${use_sniffers}\""

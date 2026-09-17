@@ -17,9 +17,13 @@
 #         libs:
 #           - tapi_cfg_wifi
 #           - ta_wifi
+#         agents:
+#           - my_agent
 #
 # 'libs' may be omitted: the Builder then treats the repository root
-# as one library named after the repository.
+# as one library named after the repository. 'agents' lists agent
+# type directories (may be omitted); name them in the sources
+# parameter of TE_TA_TYPE.
 #
 # The parser below understands the block subset shown above and
 # rejects the rest, so that a catalog reads the same way here and in
@@ -36,8 +40,8 @@ from typing import Any, Dict, List, NoReturn, Optional, Tuple
 
 
 NAME_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_]*$')
-KNOWN_KEYS = {'name', 'url', 'ref', 'libs'}
-LIST_KEYS = {'libs'}
+KNOWN_KEYS = {'name', 'url', 'ref', 'libs', 'agents'}
+LIST_KEYS = {'libs', 'agents'}
 # In YAML a '#' starts a comment only at the beginning of a line or
 # after a space; elsewhere it is an ordinary character, e.g. in
 # 'url: https://example.com/x.git#frag'
@@ -211,6 +215,7 @@ def process(path: str) -> None:
         url = repo.get('url')
         ref = repo.get('ref')
         libs = repo.get('libs', [])
+        agents = repo.get('agents', [])
 
         if not name or not NAME_RE.match(name):
             error(f'{path}: bad repository name {name!r}')
@@ -221,6 +226,10 @@ def process(path: str) -> None:
         for lib in libs:
             if not NAME_RE.match(lib):
                 error(f'{path}: repository {name}: bad library name {lib!r}')
+        for agent in agents:
+            if not NAME_RE.match(agent):
+                error(f'{path}: repository {name}: '
+                      f'bad agent type name {agent!r}')
 
         # Guard against another catalog that declares the same
         # repository differently. Compare each part of the
@@ -232,6 +241,7 @@ def process(path: str) -> None:
         emit_var(name, 'URL', 'URL', url)
         emit_var(name, 'REF', 'ref', ref)
         emit_var(name, 'LIBS', 'list of libraries', ' '.join(libs))
+        emit_var(name, 'AGENTS', 'list of agent types', ' '.join(agents))
 
 
 def main() -> None:

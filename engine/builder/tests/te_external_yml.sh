@@ -52,8 +52,6 @@ function generated() {
     for c in "$@" ; do
         "${YML}" "${WORK}/${c}" >>"${WORK}/gen.sh" || return 1
     done
-    # The generated code reports a configuration error with 'break',
-    # as the builder.m4 macros do
     bash -c '
         while true ; do
             . '"${WORK}"'/gen.sh
@@ -114,7 +112,6 @@ function expect_rejected() {
     fi
 }
 
-
 #######################################
 # Run every scenario and report the outcome.
 #
@@ -135,6 +132,7 @@ function main() {
         echo "ERROR: ${YML} is not executable" >&2
         exit 1
     }
+
     step "a catalog is turned into repository declarations"
     catalog good.yml <<'EOF'
 repositories:
@@ -206,6 +204,32 @@ EOF
     else
         fail "no conflict reported: $(grep '^ERR=' "${WORK}/out")"
     fi
+
+
+    step "agent types are declared alongside the libraries"
+    catalog agents.yml <<'EOF'
+repositories:
+  - name: r
+    url: https://example.com/r.git
+    ref: v1.0.0
+    agents:
+      - riscv_agent
+EOF
+    generated agents.yml >"${WORK}/out" || fail "parser failed"
+    expect_var 'riscv_agent' AGENTS
+    expect_var '' LIBS
+
+
+    step "a bad agent type name is refused"
+    catalog bad-agent.yml <<'EOF'
+repositories:
+  - name: r
+    url: u
+    ref: v1
+    agents:
+      - 9ag
+EOF
+    expect_rejected bad-agent.yml "bad agent type name"
 
 
     step "a bad repository name is refused"

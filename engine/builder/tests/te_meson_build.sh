@@ -6,14 +6,16 @@
 # engine/builder/te_meson_build.
 #
 # The test sources the script rather than run it, and calls its
-# function process_builder_conf(), which turns the builder
-# configuration into what a build reads. The test creates the
-# repository in the work directory, so it needs no network.
+# functions: process_builder_conf() turns the builder configuration
+# into what a build reads, and process_agent_ext() assembles the agent
+# options for meson. The test creates the repository in the work
+# directory, so it needs no network.
 #
 # The test compiles nothing. Its checks stop at the inputs of the
-# build: the variables a configuration turns into and where the
-# sources are checked out. It does not check that a library from
-# such a repository links.
+# build: the variables a configuration turns into, where the sources
+# are checked out and which options reach meson. It does not check
+# that a library from such a repository links, or that a constructor
+# registered with TE_RCF_PCH_CONF_EXT() runs in an agent.
 #
 # Usage: ./te_meson_build.sh
 
@@ -43,8 +45,8 @@ CATALOG=
 #######################################
 # Create a directory with one source file and its meson.build.
 #
-# That is the least a library directory can hold. The test does
-# not compile it.
+# That is the least a library or an agent type directory can hold.
+# The test does not compile it.
 # Arguments:
 #   Directory to create, a path.
 #   Source file name.
@@ -59,7 +61,7 @@ function mk_dir() {
 }
 
 #######################################
-# Create a bare repository with one library.
+# Create a bare repository with one library and one agent type.
 #
 # The single commit is tagged v1.
 # Globals:
@@ -74,6 +76,7 @@ function mk_ext_repo() {
     ${GIT} init -q --bare "${bare}"
     ${GIT} init -q "${work}"
     mk_dir "${work}/tapi_ext_selftest" tapi_ext_selftest.c
+    mk_dir "${work}/ta_ext_selftest" ta_ext_selftest.c
     ${GIT} -C "${work}" add .
     ${GIT} -C "${work}" commit -q -m "minimal external repository"
     ${GIT} -C "${work}" tag v1
@@ -250,11 +253,33 @@ function run_fetch() {
 }
 
 #######################################
+# Report the meson options for one agent with two extra libraries.
+#
+# Runs under with_builder(), which provides process_agent_ext().
+# Globals:
+#   TEST_PLATFORM
+# Outputs:
+#   Writes '<platform>|<agent names>|<agent libraries>' to stdout.
+#######################################
+function agent_options() {
+    local agent_ext_platform=
+    local agent_ext_names=
+    local agent_ext_libs=
+
+    TE_BS_TA_selftest_ta_PLATFORM="${TEST_PLATFORM}"
+    TE_BS_TA_selftest_ta_LIBS="tapi_ext_selftest ta_ext_selftest"
+    process_agent_ext selftest_ta TE_BS_TA_selftest_ta_ ta_ext_selftest
+    printf '%s|%s|%s\n' "${agent_ext_platform}" "${agent_ext_names}" \
+           "${agent_ext_libs}"
+}
+
+#######################################
 # Run every scenario and report the outcome.
 #
 # The configurations are heredocs, so their bodies and terminators
 # start at column zero.
 # Globals:
+#   CATALOG
 #   FETCH
 #   MESON_BUILD
 #   TEST_PLATFORM
@@ -267,6 +292,9 @@ function run_fetch() {
 function main() {
     local bare="${WORK}/ext.git"
     local lib_src="${WORK}/build/ext-repos/extselftest/tapi_ext_selftest"
+    local agent_src="${WORK}/build/ext-repos/extselftest/ta_ext_selftest"
+    local want
+    local bad
     local f
 
     for f in "${MESON_BUILD}" "${FETCH}" ; do
@@ -275,11 +303,13 @@ function main() {
             exit 1
         }
     done
+
     mk_ext_repo "${bare}"
 
-    step "TE_EXT_REPO declares the repository and its library"
+    step "TE_EXT_REPO declares the repository, its library and its agent"
     mk_conf <<EOF
-TE_EXT_REPO([extselftest], [], [${bare}], [v1], [tapi_ext_selftest])
+TE_EXT_REPO([extselftest], [], [${bare}], [v1],
+            [tapi_ext_selftest], [ta_ext_selftest])
 EOF
     if process_conf ; then
         expect_eq "the configuration error" "$(conf_get TE_BS_CONF_ERR)" ""
@@ -290,12 +320,14 @@ EOF
         expect_eq "the recorded ref" \
                   "$(conf_get TE_BS_EXT_REPO_extselftest_REF)" v1
         expect_contains "the platform library list" \
-                        "$(conf_get "${TEST_PLATFORM}_LIBS")" \
-                        tapi_ext_selftest
+                        "$(conf_get "${TEST_PLATFORM}_LIBS")" tapi_ext_selftest
         expect_eq "the library sources" \
             "$(conf_get \
                "TE_BS_LIB_${TEST_PLATFORM}_tapi_ext_selftest_SOURCES")" \
             "${lib_src}"
+        expect_eq "the agent type sources" \
+            "$(conf_get TE_BS_EXT_AGENT_ta_ext_selftest_SOURCES)" \
+            "${agent_src}"
     fi
 
     step "A repository name that is not an identifier is refused"
@@ -314,7 +346,7 @@ EOF
         expect_refused "URL and ref are mandatory"
     fi
 
-    step "TE_EXT_REPO_USE takes the URL and the ref from the catalog"
+    step "TE_EXT_REPO_USE takes the URL, the ref and the agent from the catalog"
     CATALOG="${WORK}/external.yml"
     cat >"${CATALOG}" <<EOF
 repositories:
@@ -323,6 +355,8 @@ repositories:
     ref: v1
     libs:
       - tapi_ext_selftest
+    agents:
+      - ta_ext_selftest
 EOF
     mk_conf <<'EOF'
 TE_EXT_REPO_USE([extselftest], [], [tapi_ext_selftest])
@@ -337,6 +371,9 @@ EOF
             "$(conf_get \
                "TE_BS_LIB_${TEST_PLATFORM}_tapi_ext_selftest_SOURCES")" \
             "${lib_src}"
+        expect_eq "the agent type sources" \
+            "$(conf_get TE_BS_EXT_AGENT_ta_ext_selftest_SOURCES)" \
+            "${agent_src}"
     fi
 
     step "TE_EXT_REPO_USE refuses a library the catalog does not provide"
@@ -358,12 +395,30 @@ EOF
 
     step "The sources land where the configuration says they will"
     mk_conf <<EOF
-TE_EXT_REPO([extselftest], [], [${bare}], [v1], [tapi_ext_selftest])
+TE_EXT_REPO([extselftest], [], [${bare}], [v1],
+            [tapi_ext_selftest], [ta_ext_selftest])
 EOF
     if process_conf && run_fetch ; then
         expect_file "the library sources" "${lib_src}/tapi_ext_selftest.c"
         expect_file "the library build file" "${lib_src}/meson.build"
+        expect_file "the agent type sources" "${agent_src}/ta_ext_selftest.c"
     fi
+
+    step "The agent options handed to meson name the agent and its libraries"
+    want="${TEST_PLATFORM}|ta_ext_selftest:selftest_ta"
+    want="${want}|ta_ext_selftest:tapi_ext_selftest"
+    want="${want},ta_ext_selftest:ta_ext_selftest"
+    expect_eq "the agent options" "$(with_builder agent_options)" "${want}"
+
+    step "A name that would break the option encoding is refused"
+    for bad in "with:colon" "with,comma" ; do
+        if with_builder check_agent_ext_field ta "TA name" "${bad}" \
+                >/dev/null 2>&1 ; then
+            fail "'${bad}' was accepted"
+        else
+            ok "'${bad}' is rejected"
+        fi
+    done
 
     finish
 }
