@@ -249,6 +249,57 @@ Add RPC definitions shipped in the repository with the usual TE_LIB_PARMS direct
 
 
 
+.. _doxid-group__te__engine__builder_1te_engine_builder_conf_file_te_ext_repo_use:
+
+TE_EXT_REPO_USE
++++++++++++++++
+
+.. ref-code-block:: none
+
+	TE_EXT_REPO_USE([repository name],
+	                [platform name],
+	                [list of libraries])
+
+TE_EXT_REPO_USE binds libraries of an external repository declared in a catalog to a platform. The git URL and the reference come from the catalog, so a test suite chooses only which libraries go to which platforms, and the catalog manages the versions in one place.
+
+The catalog is a YAML file; pass it to dispatcher.sh with the --external option (the option may be repeated; dispatcher.sh resolves relative paths against the configuration directories):
+
+.. ref-code-block:: none
+
+	./dispatcher.sh --external=external.yml ...
+
+Catalog format:
+
+.. ref-code-block:: none
+
+	repositories:
+	  - name: tsf_wifi
+	    url: https://example.com/tsf-wifi.git
+	    ref: v1.2.0
+	    libs:
+	      - tapi_cfg_wifi
+	      - ta_wifi
+	  - name: my_agents
+	    url: https://example.com/te-agents.git
+	    ref: v2.0
+	    agents:
+	      - riscv_agent
+
+'libs' lists the libraries the repository provides; it may be omitted, and the Builder then treats the repository root as one library named after the repository. A parser built into the Builder reads the catalog, so TE builds without a YAML library. The parser understands the block subset shown above and refuses the rest (flow collections, anchors, tags, block scalars, multiple documents), so that a catalog reads the same way here and in a full YAML reader.
+
+With the catalog above, a Builder configuration file may contain:
+
+.. ref-code-block:: none
+
+	TE_EXT_REPO_USE([tsf_wifi], [], [tapi_cfg_wifi])
+	TE_EXT_REPO_USE([tsf_wifi], [linux64], [])
+
+An empty list of libraries means all libraries the repository provides. A library the repository does not provide, or a repository absent from the catalog, is a configuration error. The Builder fetches only the repositories some platform uses.
+
+
+
+
+
 .. _doxid-group__te__engine__builder_1te_engine_builder_conf_file_te_ta_type:
 
 TE_TA_TYPE

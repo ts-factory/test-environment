@@ -10,6 +10,7 @@ Each test is a self-contained shell script; run it directly:
 
 ```sh
 ./te_fetch_ext_repos.sh
+./te_external_yml.sh
 ./te_meson_build.sh
 ```
 

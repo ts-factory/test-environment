@@ -307,6 +307,74 @@ for REPO_LIB in $REPO_LIBS ; do
 done
 ]])
 
+dnl Adds libraries of an external repository declared in an external
+dnl libraries catalog (a YAML file passed to dispatcher.sh via
+dnl --external, see engine/builder/te_external_yml) to a platform.
+dnl
+dnl The URL and the reference come from the catalog, so a test suite
+dnl builder.conf only binds the libraries to platforms and the
+dnl catalog manages the versions in one place.
+dnl
+dnl May be called several times to add libraries of the same
+dnl repository to different platforms.
+dnl
+dnl Parameters:
+dnl       repository name as declared in the catalog
+dnl       platform name; may be empty for host platform
+dnl       list of libraries to add to the platform; if empty, all
+dnl           libraries provided by the repository are added
+dnl
+define([TE_EXT_REPO_USE],
+[[
+EXTREPO="$1"
+PLATFORM="$2"
+if test -z "$PLATFORM" ; then
+    PLATFORM=${TE_HOST}
+fi
+REPO_URL_VAR="TE_BS_EXT_REPO_${EXTREPO}_URL"
+if test -z "${!REPO_URL_VAR}" ; then
+    TE_BS_CONF_ERR="external repo ${EXTREPO} is not declared: pass"
+    TE_BS_CONF_ERR="${TE_BS_CONF_ERR} the catalog with --external to"
+    TE_BS_CONF_ERR="${TE_BS_CONF_ERR} dispatcher.sh or use TE_EXT_REPO" ;
+    break ;
+fi
+REPO_ALL_LIBS_VAR="TE_BS_EXT_REPO_${EXTREPO}_LIBS"
+REPO_LIBS="$3"
+if test -z "$REPO_LIBS" ; then
+    REPO_LIBS="${!REPO_ALL_LIBS_VAR}"
+fi
+REPO_SRC="${TE_BUILD}/ext-repos/${EXTREPO}"
+REPO_ROOT_IS_LIB=
+if test -z "$REPO_LIBS" ; then
+    REPO_LIBS="$EXTREPO"
+    REPO_ROOT_IS_LIB=yes
+fi
+for REPO_LIB in $REPO_LIBS ; do
+    if test -n "${!REPO_ALL_LIBS_VAR}" ; then
+        case " ${!REPO_ALL_LIBS_VAR} " in
+            *" ${REPO_LIB} "*) ;;
+            *)
+                TE_BS_CONF_ERR="external repo ${EXTREPO} does not"
+                TE_BS_CONF_ERR="${TE_BS_CONF_ERR} provide library ${REPO_LIB}" ;
+                break 2 ;
+                ;;
+        esac
+    fi
+    if test -n "$REPO_ROOT_IS_LIB" ; then
+        REPO_LIB_SRC="${REPO_SRC}"
+    else
+        REPO_LIB_SRC="${REPO_SRC}/${REPO_LIB}"
+    fi
+    eval "${PLATFORM}_LIBS=\"\${${PLATFORM}_LIBS} ${REPO_LIB}\""
+    declare "TE_BS_LIB_${PLATFORM}_${REPO_LIB}_SOURCES"="$REPO_LIB_SRC"
+done
+case " ${TE_BS_EXT_REPOS} " in
+    *" ${EXTREPO} "*) ;;
+    *) TE_BS_EXT_REPOS="${TE_BS_EXT_REPOS} ${EXTREPO}" ;;
+esac
+]])
+
+
 dnl Declares the list of engine applications to be built by "make all" command.
 dnl May be called only once.
 dnl

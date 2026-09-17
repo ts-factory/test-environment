@@ -799,6 +799,14 @@ process_builder_conf() {
     # Defaults
     echo TE_BS_APPS=\"builder rcf logger tester configurator\"
 
+    # External libraries catalogs (dispatcher.sh --external): emit
+    # repository declarations before the builder conf so that
+    # TE_EXT_REPO_USE can bind the libraries to platforms
+    if [[ -n "${TE_EXTERNAL_YML}" ]] ; then
+        "${SCRIPT_DIR}/te_external_yml" ${TE_EXTERNAL_YML} \
+            || error "Failed to process external libraries catalog"
+    fi
+
     if test -n "${config}" ; then
         if test ! -e "${config}" ; then
             error "Cannot find ${config}"
