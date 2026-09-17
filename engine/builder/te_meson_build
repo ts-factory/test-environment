@@ -1010,5 +1010,9 @@ build_all () {
 }
 
 
-cd "${TE_BUILD}"
-build_all
+# Build only when executed. A test sources the script to reach its
+# functions without running a build.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]] ; then
+    cd "${TE_BUILD}"
+    build_all
+fi
