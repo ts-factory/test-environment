@@ -174,6 +174,7 @@ typedef enum tapi_trex_global_stat_enum {
     TAPI_TREX_GLOBAL_STAT_EXPECTED_PPS,
     TAPI_TREX_GLOBAL_STAT_EXPECTED_CPS,
     TAPI_TREX_GLOBAL_STAT_EXPECTED_L7_BPS,
+    TAPI_TREX_GLOBAL_STAT_ACTIVE_FLOWS,
 } tapi_trex_global_stat_enum;
 
 /** TRex port stat filter. */
@@ -223,6 +224,7 @@ typedef struct tapi_trex_global_stat {
     double expected_pps;
     double expected_cps;
     double expected_l7_bps;
+    double active_flows;
     double curr_time;
     double test_duration;
     bool valid;
@@ -274,6 +276,21 @@ typedef struct tapi_trex_app {
     tapi_job_channel_t *total_tx_bytes_flt;
     /** total-rx-bytes filter. */
     tapi_job_channel_t *total_rx_bytes_flt;
+
+    /**
+     * Latency probe tx-ok counter filter (one match per interface,
+     * summed at report time).
+     */
+    tapi_job_channel_t *latency_tx_pkt_filter;
+    /**
+     * Latency probe rx-ok counter filter (one match per interface,
+     * summed at report time).
+     */
+    tapi_job_channel_t *latency_rx_pkt_filter;
+    /** average-latency filter. */
+    tapi_job_channel_t *latency_avg_filter;
+    /** maximum-latency filter. */
+    tapi_job_channel_t *latency_max_filter;
 
     /** Optional filters. */
     tapi_trex_opt_flt *opt_flts;
@@ -442,8 +459,20 @@ typedef struct tapi_trex_opt {
      * flow traffic is asymmetric.
      */
     bool asymmetric_traffic_flow;
-    /** If set, report latency using high dynamic range histograms. */
+    /**
+     * If set, report latency using high dynamic range histograms.
+     *
+     * TRex ignores this unless the latency check is running, so it does
+     * nothing on its own: set @p latency_pps as well.
+     */
     bool use_hdr_histograms;
+    /**
+     * Latency check packet rate per interface, packets per second.
+     *
+     * In parallel to the test, run a latency check, sending packets at
+     * this rate from each interface.
+     */
+    tapi_job_opt_uint_t latency_pps;
     /** If set, work in IPv6 mode. */
     bool ipv6;
     /**
@@ -669,6 +698,21 @@ typedef struct tapi_trex_opt {
      */
     const char *astf_template;
     /**
+     * Path to an already expanded ASTF profile on the engine host.
+     *
+     * When not @c NULL, the file is copied to the agent exactly as it
+     * is and no expansion happens at all. That means @p astf_template
+     * is ignored, and so is every source of substitution values:
+     * @p astf_vars, and the client and server address variables that
+     * tapi_trex_gen_astf_config() would otherwise derive from
+     * @p clients and @p servers. The file must therefore already carry
+     * final addresses and final values for anything a template would
+     * have parameterised.
+     *
+     * Use it for profiles too large to pass through an RPC buffer.
+     */
+    const char *astf_template_file;
+    /**
      * Full path to TRex exec (should not be @c NULL).
      * The directory with TRex exec should also contain @c "astf_schema.json".
     */
@@ -705,6 +749,36 @@ typedef struct tapi_trex_report {
     uint64_t total_tx_bytes;
     /** Total bytes received. */
     uint64_t total_rx_bytes;
+
+    /**
+     * Latency probe packets sent during the run, summed over all
+     * interfaces. Populated only when @p tapi_trex_opt::latency_pps is
+     * set; @c 0 otherwise.
+     */
+    uint64_t latency_tx_pkts;
+    /**
+     * Latency probe packets received back, summed over all interfaces.
+     * Populated only when @p tapi_trex_opt::latency_pps is set;
+     * @c 0 otherwise.
+     *
+     * Comparing this to @p latency_tx_pkts tells whether latency
+     * probing actually worked: @c 0 received while @p latency_tx_pkts
+     * is nonzero means no probe ever came back, which is a broken
+     * measurement rather than a genuine zero latency result.
+     */
+    uint64_t latency_rx_pkts;
+    /**
+     * Average latency of the probe packets over the whole run, in
+     * microseconds, as reported by TRex's "average-latency" line.
+     * Meaningless (@c 0) unless @p latency_tx_pkts is nonzero.
+     */
+    uint64_t latency_avg_usec;
+    /**
+     * Maximum latency of the probe packets over the whole run, in
+     * microseconds, as reported by TRex's "maximum-latency" line.
+     * Meaningless (@c 0) unless @p latency_tx_pkts is nonzero.
+     */
+    uint64_t latency_max_usec;
 
     /** Optional filter values. */
     tapi_trex_opt_flt_vals *opt_flts_vals;

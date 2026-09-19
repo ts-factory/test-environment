@@ -33,6 +33,7 @@
 #include "te_sockaddr.h"
 
 #include "conf_oid.h"
+#include "rcf_api.h"
 
 /** TRex dummy interface name. */
 #define TAPI_TREX_DUMMY "dummy"
@@ -309,6 +310,12 @@ static const tapi_trex_stat_type global_stat_types[] = {
         .with_units = true,
         .type = TAPI_TREX_VAL_TYPE_DOUBLE,
         .offset = offsetof(struct tapi_trex_global_stat, expected_l7_bps) },
+    [TAPI_TREX_GLOBAL_STAT_ACTIVE_FLOWS] = {
+        .name = "Active-flows",
+        .re = "\\s+:\\s+([0-9]+)",
+        .with_units = false,
+        .type = TAPI_TREX_VAL_TYPE_DOUBLE,
+        .offset = offsetof(struct tapi_trex_global_stat, active_flows) },
 };
 
 /** TRex interface description. */
@@ -370,6 +377,7 @@ static const tapi_job_opt_bind trex_args_binds[] = TAPI_JOB_OPT_SET(
     TAPI_JOB_OPT_DOUBLE("-d", false, NULL, tapi_trex_opt, duration),
     TAPI_JOB_OPT_BOOL("--flip", tapi_trex_opt, asymmetric_traffic_flow),
     TAPI_JOB_OPT_BOOL("--hdrh", tapi_trex_opt, use_hdr_histograms),
+    TAPI_JOB_OPT_UINT_T("-l", false, NULL, tapi_trex_opt, latency_pps),
     TAPI_JOB_OPT_BOOL("--ipv6", tapi_trex_opt, ipv6),
     TAPI_JOB_OPT_DOUBLE("-m", false, NULL, tapi_trex_opt, rate_multiplier),
     TAPI_JOB_OPT_BOOL("--nc", tapi_trex_opt, force_close_at_end),
@@ -423,6 +431,7 @@ const tapi_trex_opt tapi_trex_default_opt = {
     .duration = TAPI_JOB_OPT_DOUBLE_UNDEF,
     .asymmetric_traffic_flow = false,
     .use_hdr_histograms = false,
+    .latency_pps = TAPI_JOB_OPT_UINT_UNDEF,
     .ipv6 = false,
     .rate_multiplier = TAPI_JOB_OPT_DOUBLE_UNDEF,
     .force_close_at_end = false,
@@ -548,14 +557,6 @@ tapi_trex_gen_astf_config(const char *ta, const tapi_trex_opt *opt)
     te_kvpair_h kvpairs;
     te_kvpair_init(&kvpairs);
 
-    te_string_append(&template, "%s", opt->astf_template);
-
-    tapi_trex_gen_clients_astf_conf(opt->clients, &kvpairs);
-    tapi_trex_gen_servers_astf_conf(opt->servers, &kvpairs);
-
-    if (opt->astf_vars != NULL)
-        te_kvpairs_copy(&kvpairs, opt->astf_vars);
-
     rc = te_snprintf(astf_json_path, sizeof(astf_json_path),
                      TAPI_TREX_ASTF_CONF_FMT,
                      prefix_is_empty ? "" : "-",
@@ -566,6 +567,37 @@ tapi_trex_gen_astf_config(const char *ta, const tapi_trex_opt *opt)
         ERROR("Failed to generate TRex ASTF config file name: %r", rc);
         goto cleanup;
     }
+
+    /*
+     * An already expanded profile may be far larger than an RPC buffer,
+     * so it is shipped to the agent as a file instead of a string.
+     *
+     * This branch must stay above the te_string_append() of
+     * astf_template below. A caller that sets astf_template_file is
+     * entitled to leave astf_template as NULL, and glibc renders a NULL
+     * argument of "%s" as the literal text "(null)" rather than failing.
+     * Appending first would therefore not crash: it would quietly ship a
+     * profile containing "(null)" to the traffic generator and produce a
+     * wrong run that looks like a real one.
+     */
+    if (opt->astf_template_file != NULL)
+    {
+        rc = rcf_ta_put_file(ta, 0, opt->astf_template_file, astf_json_path);
+        if (rc != 0)
+        {
+            ERROR("Failed to copy TRex ASTF config '%s' to '%s': %r",
+                  opt->astf_template_file, astf_json_path, rc);
+        }
+        goto cleanup;
+    }
+
+    te_string_append(&template, "%s", opt->astf_template);
+
+    tapi_trex_gen_clients_astf_conf(opt->clients, &kvpairs);
+    tapi_trex_gen_servers_astf_conf(opt->servers, &kvpairs);
+
+    if (opt->astf_vars != NULL)
+        te_kvpairs_copy(&kvpairs, opt->astf_vars);
 
     rc = tapi_file_expand_kvpairs(ta, template.ptr, NULL, &kvpairs,
                                   astf_json_path);
@@ -1584,6 +1616,43 @@ tapi_trex_create(tapi_job_factory_t *factory,
                                     .filter_var = &new_app->total_rx_bytes_flt,
                                 },
                                 {
+                                    /*
+                                     * Printed once per interface in the
+                                     * per-port latency summary at the end
+                                     * of the run; the values are summed
+                                     * over all interfaces at report time.
+                                     */
+                                    .use_stdout = true,
+                                    .readable = true,
+                                    .re = "m_tx_pkt_ok\\s+:\\s+([0-9]+)",
+                                    .extract = 1,
+                                    .filter_var = &new_app->latency_tx_pkt_filter,
+                                },
+                                {
+                                    .use_stdout = true,
+                                    .readable = true,
+                                    .re = "m_pkt_ok\\s+:\\s+([0-9]+)",
+                                    .extract = 1,
+                                    .filter_var = &new_app->latency_rx_pkt_filter,
+                                },
+                                {
+                                    /* Printed once, at the end of the run. */
+                                    .use_stdout = true,
+                                    .readable = true,
+                                    .re = "average-latency\\s+:\\s+([0-9]+)"
+                                          "\\s+usec",
+                                    .extract = 1,
+                                    .filter_var = &new_app->latency_avg_filter,
+                                },
+                                {
+                                    .use_stdout = true,
+                                    .readable = true,
+                                    .re = "maximum-latency\\s+:\\s+([0-9]+)"
+                                          "\\s+usec",
+                                    .extract = 1,
+                                    .filter_var = &new_app->latency_max_filter,
+                                },
+                                {
                                    .use_stdout  = true,
                                    .readable    = true,
                                    .log_level   = opt->stdout_log_level,
@@ -1964,6 +2033,58 @@ get_single_uint64_opt(tapi_job_channel_t *filter, uint64_t *value)
 }
 
 /**
+ * Get the sum of every uint64_t value a filter matched over the whole
+ * life of the job (e.g. one value printed per interface). It is not
+ * an error for the filter to have matched nothing at all (e.g. because
+ * the feature that prints it was not enabled): the sum is @c 0 then.
+ *
+ * @param filter[in]    from where to read the messages
+ * @param value[out]    where to save the sum
+ *
+ * @return Status code.
+ */
+static te_errno
+get_sum_uint64(tapi_job_channel_t *filter, uint64_t *value)
+{
+    te_errno rc;
+    unsigned int i;
+    tapi_job_buffer_t *bufs = NULL;
+    unsigned int n_bufs = 0;
+    uint64_t sum = 0;
+    uint64_t one;
+
+    rc = tapi_job_receive_many(TAPI_JOB_CHANNEL_SET(filter),
+                               TAPI_TREX_TIMEOUT_MS, &bufs, &n_bufs);
+    if (rc != 0)
+    {
+        ERROR("%s() tapi_job_receive_many returned unexpected result: %r",
+              __func__, rc);
+        return rc;
+    }
+
+    for (i = 0; i < n_bufs; i++)
+    {
+        if (bufs[i].eos)
+            break;
+
+        rc = te_str_to_uint64(bufs[i].data.ptr, 10, &one);
+        if (rc != 0)
+        {
+            ERROR("%s() failed to convert value '%s': %r", __func__,
+                  bufs[i].data.ptr, rc);
+            break;
+        }
+        sum += one;
+    }
+
+    if (rc == 0)
+        *value = sum;
+
+    tapi_job_buffers_free(bufs, n_bufs);
+    return rc;
+}
+
+/**
  * Get a single double value.
  *
  * @param filter[in]    from where to read the message
@@ -2268,6 +2389,29 @@ tapi_trex_get_report(tapi_trex_app *app, tapi_trex_report *report)
 
     rc = get_single_double(app->m_traff_dur_srv_flt, &report->m_traff_dur_srv,
                            &bin_units);
+    if (rc != 0)
+        return rc;
+
+    /*
+     * These are printed only when the latency check (-l) is enabled;
+     * absence of a match (latency check not requested) is not an error
+     * and simply leaves the report fields at 0.
+     */
+    rc = get_sum_uint64(app->latency_tx_pkt_filter, &report->latency_tx_pkts);
+    if (rc != 0)
+        return rc;
+
+    rc = get_sum_uint64(app->latency_rx_pkt_filter, &report->latency_rx_pkts);
+    if (rc != 0)
+        return rc;
+
+    rc = get_single_uint64_opt(app->latency_avg_filter,
+                               &report->latency_avg_usec);
+    if (rc != 0)
+        return rc;
+
+    rc = get_single_uint64_opt(app->latency_max_filter,
+                               &report->latency_max_usec);
     if (rc != 0)
         return rc;
 
