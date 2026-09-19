@@ -203,6 +203,7 @@ RCF_CONSISTENCY_CHECKS_SIMPLE=yes
 
 # Subsystems to be initialized
 BUILDER=yes
+FETCH_EXTERNAL_ONLY=
 TESTER=yes
 RCF=yes
 CS=yes
@@ -269,6 +270,9 @@ LOGGER_META_FILE=
 
 declare -a TE_TESTER_SCRIPTS
 declare -a TE_FINISH_SCRIPTS
+
+# External libraries catalogs passed with --external
+declare -a EXTERNAL_YML
 export TE_TA_LIST_FILE=ta.list
 
 usage()
@@ -296,6 +300,21 @@ Generic options:
     configuration file or name of the file in the configuration directory.
 
   --conf-builder=<filename>     Builder config file (${CONF_BUILDER_DFLT} by default).
+  --external=<filename>         External libraries catalog (YAML) that declares
+                                git repositories with TE libraries; the Builder
+                                config file binds them to platforms with
+                                TE_EXT_REPO_USE. May be repeated.
+  --update-external             Re-resolve the references of external
+                                repositories, move them to the current commits
+                                and rewrite the lock file next to the Builder
+                                config file. Without it a build uses the
+                                commits recorded there and does not change on
+                                its own.
+  --fetch-external-only         Obtain the external repositories and stop
+                                without a build. Use it where the build itself
+                                has no credentials for them, or with
+                                --update-external to move the lock file on
+                                without a full build.
   --conf-cs=<filename>          Configurator config file (${CONF_CS_DFLT} by default).
   --conf-logger=<filename>      Logger config file (${CONF_LOGGER_DFLT} by default).
   --conf-rcf=<filename>         RCF config file (${CONF_RCF_DFLT} by default).
@@ -725,6 +744,11 @@ process_opts()
                 CONF_DIRS="${CONF_DIRS}${CONF_DIRS:+:}${1#--conf-dirs=}" ;;
 
             --conf-builder=*) CONF_BUILDER_SET=1; CONF_BUILDER="${1#--conf-builder=}" ;;
+            --external=*) EXTERNAL_YML+=("${1#--external=}") ;;
+            --update-external) export TE_EXT_REPOS_UPDATE=yes ;;
+            --fetch-external-only)
+                FETCH_EXTERNAL_ONLY=yes
+                export TE_EXT_REPOS_FETCH_ONLY=yes ;;
             --conf-logger=*) CONF_LOGGER_SET=1; CONF_LOGGER="${1#--conf-logger=}" ;;
             --conf-tester=*) CONF_TESTER_SET=1; CONF_TESTER="${1#--conf-tester=}" ;;
             --conf-cs=*) CONF_CS_SET=1; CONF_CS="${CONF_CS}${CONF_CS:+ }${1#--conf-cs=}" ;;
@@ -1103,6 +1127,23 @@ for i in BUILDER LOGGER TESTER CS RCF RGT NUT ; do
     eval CONF_$i=\$CONF_FILES_POST
 done
 
+# Resolve external libraries catalogs (--external) against
+# configuration directories and export for the Builder
+if (( ${#EXTERNAL_YML[@]} > 0 )) ; then
+    # The Builder gets the catalogs through the environment, so they
+    # go there as one whitespace-separated list of paths
+    TE_EXTERNAL_YML=
+    for external_file in "${EXTERNAL_YML[@]}" ; do
+        external_path="$(resolve_conf_file_path "${external_file}")"
+        if [[ -z "${external_path}" || ! -f "${external_path}" ]] ; then
+            echo "Cannot find external libraries catalog ${external_file}" >&2
+            exit 1
+        fi
+        TE_EXTERNAL_YML+="${TE_EXTERNAL_YML:+ }${external_path}"
+    done
+    export TE_EXTERNAL_YML
+fi
+
 # Create directory for temporary files
 if test -z "$TE_TMP" ; then
     export TE_TMP="${TE_RUN_DIR}/te_tmp"
@@ -1255,6 +1296,10 @@ if test -n "$BUILDER" ; then
         $PROFILE_BUILD "${TE_BASE}"/engine/builder/te_meson_build \
             "${CONF_BUILDER}" || exit_with_log
     fi
+fi
+
+if [[ -n "${FETCH_EXTERNAL_ONLY}" ]] ; then
+    exit 0
 fi
 
 if test "$RCF_CONSISTENCY_CHECKS_SIMPLE" = "yes" ; then

@@ -213,6 +213,206 @@ eval `echo TE_BS_LIB_${PLATFORM}_$1_CFLAGS=\"$6\"`
 eval `echo TE_BS_LIB_${PLATFORM}_$1_LDFLAGS=\"$7\"`
 ])
 
+dnl Declares an external git repository that provides TE libraries.
+dnl
+dnl The repository is fetched by the Builder (see te_fetch_ext_repos)
+dnl into ${TE_BUILD}/ext-repos/<name> before platforms are built.
+dnl The declared libraries are added to the platform library list and
+dnl their sources are copied into the platform build workspace by
+dnl te_cross_build_meson, so they build as subdirectories of
+dnl ${TE_BASE}/lib.
+dnl
+dnl Each declared library must be a directory with a meson.build
+dnl following the contract of ${TE_BASE}/lib/meson.build subdirectories
+dnl (set 'sources', 'headers', 'te_libs', etc.; it may override
+dnl 'build_lib_shared'/'build_lib_static'/'install_lib'/'link_whole'
+dnl to build an engine-side shared library or to link into agents
+dnl with link_whole).
+dnl
+dnl May be called several times for the same repository to add its
+dnl libraries to different platforms; URL and ref must be the same
+dnl in all calls.
+dnl
+dnl Parameters:
+dnl       repository name (should start with a letter and contain
+dnl           only letters, digits and underscores)
+dnl       platform name; may be empty for host platform
+dnl       git URL (anything accepted by git clone: https, ssh,
+dnl           local path)
+dnl       git reference to check out: tag, commit hash or branch name
+dnl           (pin a tag or commit for reproducible builds)
+dnl       list of libraries to take from the repository: names of
+dnl           its subdirectories; if empty, the repository root
+dnl           itself is treated as a single library named after
+dnl           the repository
+dnl       list of agent types provided by the repository: names of
+dnl           its subdirectories (may be empty); reference such an
+dnl           agent type in the sources parameter of TE_TA_TYPE
+dnl
+define([TE_EXT_REPO],
+[[
+EXTREPO="$1"
+case "$EXTREPO" in
+     [^a-zA-Z]*)
+        TE_BS_CONF_ERR="external repo name does not start with a letter" ;
+        break ;
+        ;;
+     *[^a-zA-Z0-9_]*)
+        TE_BS_CONF_ERR="external repo name contains illegal characters" ;
+        break ;
+        ;;
+esac
+PLATFORM="$2"
+if test -z "$PLATFORM" ; then
+    PLATFORM=${TE_HOST}
+fi
+REPO_URL="$3"
+REPO_REF="$4"
+REPO_LIBS="$5"
+if test -z "$REPO_URL" -o -z "$REPO_REF" ; then
+    TE_BS_CONF_ERR="external repo ${EXTREPO}: URL and ref are mandatory" ;
+    break ;
+fi
+REPO_URL_VAR="TE_BS_EXT_REPO_${EXTREPO}_URL"
+if test -n "${!REPO_URL_VAR}" ; then
+    if test "${!REPO_URL_VAR}" != "$REPO_URL" ; then
+        TE_BS_CONF_ERR="external repo ${EXTREPO} is declared twice"
+        TE_BS_CONF_ERR="${TE_BS_CONF_ERR} with different URLs" ;
+        break ;
+    fi
+    REPO_REF_VAR="TE_BS_EXT_REPO_${EXTREPO}_REF"
+    if test "${!REPO_REF_VAR}" != "$REPO_REF" ; then
+        TE_BS_CONF_ERR="external repo ${EXTREPO} is declared twice"
+        TE_BS_CONF_ERR="${TE_BS_CONF_ERR} with different refs" ;
+        break ;
+    fi
+fi
+case " ${TE_BS_EXT_REPOS} " in
+    *" ${EXTREPO} "*) ;;
+    *) TE_BS_EXT_REPOS="${TE_BS_EXT_REPOS} ${EXTREPO}" ;;
+esac
+declare "TE_BS_EXT_REPO_${EXTREPO}_URL"="$REPO_URL"
+declare "TE_BS_EXT_REPO_${EXTREPO}_REF"="$REPO_REF"
+REPO_SRC="${TE_BUILD}/ext-repos/${EXTREPO}"
+REPO_ROOT_IS_LIB=
+if test -z "$REPO_LIBS" -a -z "$6" ; then
+    REPO_LIBS="$EXTREPO"
+    REPO_ROOT_IS_LIB=yes
+fi
+for REPO_LIB in $REPO_LIBS ; do
+    if test -n "$REPO_ROOT_IS_LIB" ; then
+        REPO_LIB_SRC="${REPO_SRC}"
+    else
+        REPO_LIB_SRC="${REPO_SRC}/${REPO_LIB}"
+    fi
+    eval "${PLATFORM}_LIBS=\"\${${PLATFORM}_LIBS} ${REPO_LIB}\""
+    declare "TE_BS_LIB_${PLATFORM}_${REPO_LIB}_SOURCES"="$REPO_LIB_SRC"
+done
+REPO_AGENTS="$6"
+for REPO_AGENT in $REPO_AGENTS ; do
+    case "$REPO_AGENT" in
+        [^a-zA-Z]*|*[^a-zA-Z0-9_]*)
+            TE_BS_CONF_ERR="external repo ${EXTREPO}: bad agent"
+            TE_BS_CONF_ERR="${TE_BS_CONF_ERR} type name ${REPO_AGENT}" ;
+            break 2 ;
+            ;;
+    esac
+    REPO_AGENT_SRC_VAR="TE_BS_EXT_AGENT_${REPO_AGENT}_SOURCES"
+    if test -n "${!REPO_AGENT_SRC_VAR}" -a \
+            "${!REPO_AGENT_SRC_VAR}" != "${REPO_SRC}/${REPO_AGENT}" ; then
+        TE_BS_CONF_ERR="external agent type ${REPO_AGENT} is"
+        TE_BS_CONF_ERR="${TE_BS_CONF_ERR} provided by more than"
+        TE_BS_CONF_ERR="${TE_BS_CONF_ERR} one repository" ;
+        break 2 ;
+    fi
+    declare "$REPO_AGENT_SRC_VAR"="${REPO_SRC}/${REPO_AGENT}"
+done
+]])
+
+dnl Adds libraries of an external repository declared in an external
+dnl libraries catalog (a YAML file passed to dispatcher.sh via
+dnl --external, see engine/builder/te_external_yml) to a platform.
+dnl
+dnl The URL and the reference come from the catalog, so a test suite
+dnl builder.conf only binds the libraries to platforms and the
+dnl catalog manages the versions in one place.
+dnl
+dnl May be called several times to add libraries of the same
+dnl repository to different platforms.
+dnl
+dnl Agent types listed in the catalog ('agents' key) become available
+dnl automatically when the repository is used: reference them in the
+dnl sources parameter of TE_TA_TYPE.
+dnl
+dnl Parameters:
+dnl       repository name as declared in the catalog
+dnl       platform name; may be empty for host platform
+dnl       list of libraries to add to the platform; if empty, all
+dnl           libraries provided by the repository are added
+dnl
+define([TE_EXT_REPO_USE],
+[[
+EXTREPO="$1"
+PLATFORM="$2"
+if test -z "$PLATFORM" ; then
+    PLATFORM=${TE_HOST}
+fi
+REPO_URL_VAR="TE_BS_EXT_REPO_${EXTREPO}_URL"
+if test -z "${!REPO_URL_VAR}" ; then
+    TE_BS_CONF_ERR="external repo ${EXTREPO} is not declared: pass"
+    TE_BS_CONF_ERR="${TE_BS_CONF_ERR} the catalog with --external to"
+    TE_BS_CONF_ERR="${TE_BS_CONF_ERR} dispatcher.sh or use TE_EXT_REPO" ;
+    break ;
+fi
+REPO_ALL_LIBS_VAR="TE_BS_EXT_REPO_${EXTREPO}_LIBS"
+REPO_LIBS="$3"
+if test -z "$REPO_LIBS" ; then
+    REPO_LIBS="${!REPO_ALL_LIBS_VAR}"
+fi
+REPO_SRC="${TE_BUILD}/ext-repos/${EXTREPO}"
+REPO_AGENTS_VAR="TE_BS_EXT_REPO_${EXTREPO}_AGENTS"
+REPO_ROOT_IS_LIB=
+if test -z "$REPO_LIBS" -a -z "${!REPO_AGENTS_VAR}" ; then
+    REPO_LIBS="$EXTREPO"
+    REPO_ROOT_IS_LIB=yes
+fi
+for REPO_LIB in $REPO_LIBS ; do
+    if test -n "${!REPO_ALL_LIBS_VAR}" ; then
+        case " ${!REPO_ALL_LIBS_VAR} " in
+            *" ${REPO_LIB} "*) ;;
+            *)
+                TE_BS_CONF_ERR="external repo ${EXTREPO} does not"
+                TE_BS_CONF_ERR="${TE_BS_CONF_ERR} provide library ${REPO_LIB}" ;
+                break 2 ;
+                ;;
+        esac
+    fi
+    if test -n "$REPO_ROOT_IS_LIB" ; then
+        REPO_LIB_SRC="${REPO_SRC}"
+    else
+        REPO_LIB_SRC="${REPO_SRC}/${REPO_LIB}"
+    fi
+    eval "${PLATFORM}_LIBS=\"\${${PLATFORM}_LIBS} ${REPO_LIB}\""
+    declare "TE_BS_LIB_${PLATFORM}_${REPO_LIB}_SOURCES"="$REPO_LIB_SRC"
+done
+REPO_AGENTS_VAR="TE_BS_EXT_REPO_${EXTREPO}_AGENTS"
+for REPO_AGENT in ${!REPO_AGENTS_VAR} ; do
+    REPO_AGENT_SRC_VAR="TE_BS_EXT_AGENT_${REPO_AGENT}_SOURCES"
+    if test -n "${!REPO_AGENT_SRC_VAR}" -a \
+            "${!REPO_AGENT_SRC_VAR}" != "${REPO_SRC}/${REPO_AGENT}" ; then
+        TE_BS_CONF_ERR="external agent type ${REPO_AGENT} is"
+        TE_BS_CONF_ERR="${TE_BS_CONF_ERR} provided by more than"
+        TE_BS_CONF_ERR="${TE_BS_CONF_ERR} one repository" ;
+        break 2 ;
+    fi
+    declare "$REPO_AGENT_SRC_VAR"="${REPO_SRC}/${REPO_AGENT}"
+done
+case " ${TE_BS_EXT_REPOS} " in
+    *" ${EXTREPO} "*) ;;
+    *) TE_BS_EXT_REPOS="${TE_BS_EXT_REPOS} ${EXTREPO}" ;;
+esac
+]])
+
 
 dnl Declares the list of engine applications to be built by "make all" command.
 dnl May be called only once.
@@ -330,12 +530,24 @@ then
 fi
 ]
 SOURCES=$3
-if test -z "$SOURCES" ; then
+[
+EXT_AGENT_SRC=
+case "$SOURCES" in
+    ""|*[^a-zA-Z0-9_]*) ;;
+    *)
+        EXT_AGENT_SRC_VAR="TE_BS_EXT_AGENT_${SOURCES}_SOURCES"
+        EXT_AGENT_SRC="${!EXT_AGENT_SRC_VAR}"
+        ;;
+esac
+]
+if test -n "$EXT_AGENT_SRC" ; then
+    SOURCES=$EXT_AGENT_SRC ;
+elif test -z "$SOURCES" ; then
     SOURCES=${TE_BASE}/agents/$1 ;
 elif test "${SOURCES:0:1}" != "/" ; then
     SOURCES=${TE_BASE}/agents/$SOURCES ;
 fi
-if ! test -d "$SOURCES" ; then
+if test -z "$EXT_AGENT_SRC" && ! test -d "$SOURCES" ; then
     TMP=${TE_BASE}/lib/`basename $SOURCES`
     if test -d "$TMP" ; then
         SOURCES=$TMP
