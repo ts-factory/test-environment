@@ -92,6 +92,26 @@ mk_platform_src() {
             rsync_to "${p}" "${src}"/ "${src_ws}/lib/${l}" \
                 "${RSYNC_VCS_STUFF[@]}" "${RSYNC_VCS_IGNORES[@]}"
     done
+
+    # Copy out-of-tree Test Agent sources (external agent types
+    # provided by TE_EXT_REPO repositories) to agents/ in the
+    # workspace so that the agents/meson.build subdir() finds them
+    local ta
+    for ta in ${TE_BS_TA} ; do
+        local ta_platform_var="TE_BS_TA_${ta}_PLATFORM"
+        [[ "${!ta_platform_var}" == "${p}" ]] || continue
+        local ta_src_var="TE_BS_TA_${ta}_SOURCES"
+        local ta_src="${!ta_src_var}"
+        [[ -n "${ta_src}" ]] || continue
+        # Separate statement: local does not propagate the exit
+        # status of a command substitution
+        local ta_name
+        ta_name="$(basename "${ta_src}")"
+        [[ "${ta_src}" == "${TE_BASE}/agents/${ta_name}"
+           || "${ta_src}" == "${TE_BASE}/lib/${ta_name}" ]] \
+            || rsync_to "${p}" "${ta_src}"/ "${src_ws}/agents/${ta_name}" \
+                "${RSYNC_VCS_STUFF[@]}" "${RSYNC_VCS_IGNORES[@]}"
+    done
 }
 
 make_workspace() {
