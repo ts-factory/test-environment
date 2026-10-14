@@ -20,6 +20,12 @@ option('custom-lib-opts', type: 'array', value: [],
        description: 'Array of custom libraries options in format: <build-lib-name>:<real-te-lib-name>:<opt-name>:<value>')
 option('agents', type: 'string', value: '',
        description: 'Test Agents to build')
+option('agent-ext-platform', type: 'string', value: '',
+       description: 'External Test Agents platform')
+option('agent-ext-names', type: 'array', value: [],
+       description: 'External agent types: <agent-dir>:<ta-name>')
+option('agent-ext-libs', type: 'array', value: [],
+       description: 'Libraries of external agent types: <agent-dir>:<lib>')
 option('agent-apps', type: 'string', value: '',
        description: 'Agent applications to build')
 option('tools', type: 'string', value: '',

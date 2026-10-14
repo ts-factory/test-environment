@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Interpretica, Unipessoal Lda. All rights reserved.
+#
+# Test Environment Builder
+#
+# Convert an external libraries catalog (YAML) into shell declarations
+# consumed by the Builder (see TE_EXT_REPO_USE in builder.m4 and
+# te_fetch_ext_repos).
+#
+# Catalog format:
+#
+#     repositories:
+#       - name: tsf_wifi
+#         url: https://example.com/tsf-wifi.git
+#         ref: v1.0.0
+#         libs:
+#           - tapi_cfg_wifi
+#           - ta_wifi
+#         agents:
+#           - my_agent
+#
+# 'libs' may be omitted: the Builder then treats the repository root
+# as one library named after the repository. 'agents' lists agent
+# type directories (may be omitted); name them in the sources
+# parameter of TE_TA_TYPE.
+#
+# The parser below understands the block subset shown above and
+# rejects the rest, so that a catalog reads the same way here and in
+# a full YAML reader, and TE builds without a YAML library. Flow
+# collections, anchors, tags, block scalars and multiple documents
+# are errors.
+#
+# Usage: te_external_yml <catalog.yml> [...]
+"""Convert an external libraries catalog into Builder declarations."""
+import re
+import shlex
+import sys
+from typing import Any, Dict, List, NoReturn, Optional, Tuple
+
+
+NAME_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_]*$')
+KNOWN_KEYS = {'name', 'url', 'ref', 'libs', 'agents'}
+LIST_KEYS = {'libs', 'agents'}
+# In YAML a '#' starts a comment only at the beginning of a line or
+# after a space; elsewhere it is an ordinary character, e.g. in
+# 'url: https://example.com/x.git#frag'
+COMMENT_RE = re.compile(r'(?:^|\s)#')
+
+# Constructs of the full language that the subset does not cover.
+# Refuse them; a misreading would be worse.
+UNSUPPORTED = (
+    ('\t', 'a tab (indent with spaces)'),
+    ('&', 'an anchor'),
+    ('*', 'an alias'),
+    ('!', 'a tag'),
+)
+
+# One repository declaration: a string under each scalar key and a
+# list of strings under 'libs' and 'agents'.
+Repo = Dict[str, Any]
+
+
+def error(msg: str) -> NoReturn:
+    """Report a refusal and exit.
+
+    Args:
+        msg: what is wrong, prefixed by the location when there is one.
+    """
+    sys.stderr.write(f'ERROR: {msg}\n')
+    sys.exit(1)
+
+
+def reject_unsupported(line: str, loc: str) -> None:
+    """Refuse a line that uses YAML beyond the subset.
+
+    Args:
+        line: the line, with its trailing comment already cut.
+        loc: location of the line, for the diagnostics.
+    """
+    stripped = line.strip()
+    if stripped in ('---', '...'):
+        error(f'{loc}: this parser reads one document only')
+    for char, what in UNSUPPORTED:
+        if char in line:
+            error(f'{loc}: this parser does not support {what}')
+    value = stripped.partition(':')[2].strip() if ':' in stripped else ''
+    if value[:1] in ('[', '{'):
+        error(f'{loc}: this parser does not support flow collections; '
+              'use a block sequence')
+    if value in ('|', '>') or value[:2] in ('|-', '>-', '|+', '>+'):
+        error(f'{loc}: this parser does not support block scalars')
+
+
+def strip_comment(raw: str) -> str:
+    """Cut a trailing comment off a line the way YAML does."""
+    match = COMMENT_RE.search(raw)
+    if match:
+        raw = raw[:match.start()]
+    return raw.rstrip()
+
+
+def split_kv(s: str, loc: str) -> Tuple[str, str]:
+    """Split a 'key: value' entry into its two halves."""
+    if ':' not in s:
+        error(f'{loc}: expected "key: value", got {s!r}')
+    key, _, value = s.partition(':')
+    return key.strip(), unquote(value.strip())
+
+
+def unquote(s: str) -> str:
+    """Strip the quotes off a scalar that carries a matching pair."""
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        return s[1:-1]
+    return s
+
+
+def parse_catalog(path: str) -> List[Repo]:
+    """Parse the documented catalog subset into a list of repositories.
+
+    Args:
+        path: the catalog file.
+
+    Returns:
+        One dictionary per repository, in the order of the catalog.
+    """
+    repos: List[Repo] = []
+    cur_list: Optional[str] = None
+
+    with open(path, encoding='utf-8') as f:
+        for lineno, raw in enumerate(f, 1):
+            line = strip_comment(raw)
+            if not line.strip():
+                continue
+            loc = f'{path}:{lineno}'
+            reject_unsupported(line, loc)
+            stripped = line.strip()
+            indent = len(line) - len(line.lstrip())
+
+            if indent == 0:
+                if stripped == 'repositories:':
+                    continue
+                error(f'{loc}: unexpected top-level entry {stripped!r}; '
+                      '"repositories:" is the only one allowed')
+
+            if stripped.startswith('- ') or stripped == '-':
+                item = stripped[1:].strip()
+                if repos and cur_list is not None and ':' not in item:
+                    repos[-1][cur_list].append(unquote(item))
+                    continue
+                # New repository entry
+                cur_list = None
+                repos.append({})
+                if item:
+                    key, value = split_kv(item, loc)
+                    repos[-1][key] = value
+                continue
+
+            if not repos:
+                error(f'{loc}: mapping entry outside of a repository item')
+
+            key, value = split_kv(stripped, loc)
+            if key in LIST_KEYS:
+                if value:
+                    error(f'{loc}: "{key}" must be a list')
+                repos[-1][key] = []
+                cur_list = key
+            else:
+                cur_list = None
+                repos[-1][key] = value
+
+    return repos
+
+
+def emit_var(name: str, suffix: str, what: str, value: str) -> None:
+    """Emit a guarded assignment of one part of a repository declaration.
+
+    Args:
+        name: repository name.
+        suffix: the part being declared, as the variable name spells it.
+        what: the part being declared, as the diagnostics names it.
+        value: the declared value.
+    """
+    var = f'TE_BS_EXT_REPO_{name}_{suffix}'
+    # '${var+set}' rather than -n: an empty list is a declaration too,
+    # and conflicts with a non-empty one
+    declared = '${' + var + '+set}'
+    current = '${' + var + '}'
+    quoted = shlex.quote(value)
+    clash = f'external repo {name} is already declared with a different {what}'
+    conflict = shlex.quote(clash)
+
+    print(f'if [[ -n "{declared}" && "{current}" != {quoted} ]] ; then')
+    print(f'    TE_BS_CONF_ERR={conflict} ;')
+    print('    break ;')
+    print('fi')
+    print(f'{var}={quoted}')
+
+
+def process(path: str) -> None:
+    """Turn one catalog into the shell declarations the Builder reads.
+
+    Args:
+        path: the catalog file.
+    """
+    # The parser guarantees the shape: a repository is a mapping of
+    # strings, and a list key holds a list. Check the content only.
+    for repo in parse_catalog(path):
+        unknown = set(repo) - KNOWN_KEYS
+        if unknown:
+            keys = ', '.join(sorted(unknown))
+            error(f'{path}: unknown repository keys: {keys}')
+
+        name = repo.get('name')
+        url = repo.get('url')
+        ref = repo.get('ref')
+        libs = repo.get('libs', [])
+        agents = repo.get('agents', [])
+
+        if not name or not NAME_RE.match(name):
+            error(f'{path}: bad repository name {name!r}')
+        if not url:
+            error(f'{path}: repository {name}: "url" is mandatory')
+        if not ref:
+            error(f'{path}: repository {name}: "ref" is mandatory')
+        for lib in libs:
+            if not NAME_RE.match(lib):
+                error(f'{path}: repository {name}: bad library name {lib!r}')
+        for agent in agents:
+            if not NAME_RE.match(agent):
+                error(f'{path}: repository {name}: '
+                      f'bad agent type name {agent!r}')
+
+        # Guard against another catalog that declares the same
+        # repository differently. Compare each part of the
+        # declaration: otherwise the order of the --external options
+        # would pick the winner among conflicting refs or library
+        # lists. The Builder sources the generated code inside a
+        # dummy loop, so 'break' reports a configuration error, as
+        # the builder.m4 macros do.
+        emit_var(name, 'URL', 'URL', url)
+        emit_var(name, 'REF', 'ref', ref)
+        emit_var(name, 'LIBS', 'list of libraries', ' '.join(libs))
+        emit_var(name, 'AGENTS', 'list of agent types', ' '.join(agents))
+
+
+def main() -> None:
+    """Process every catalog named on the command line."""
+    if len(sys.argv) < 2:
+        error(f'Usage: {sys.argv[0]} <catalog.yml> [...]')
+    for path in sys.argv[1:]:
+        process(path)
+
+
+if __name__ == '__main__':
+    main()

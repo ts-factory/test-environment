@@ -161,6 +161,7 @@ typedef struct pam_message const pam_message_t;
 #include "comm_agent.h"
 #include "rcf_ch_api.h"
 #include "rcf_pch.h"
+#include "rcf_pch_conf_ext.h"
 #include "rcf_pch_ta_cfg.h"
 #include "rcf_pch_tree.h"
 #include "logger_api.h"
@@ -973,6 +974,13 @@ rcf_ch_conf_init(void)
             goto fail;
 
         if (ta_unix_conf_selftest_init() != 0)
+            goto fail;
+
+        /*
+         * Subtrees that external libraries registered with
+         * TE_RCF_PCH_CONF_EXT() go after the built-in ones.
+         */
+        if (rcf_pch_conf_ext_init_all() != 0)
             goto fail;
 
         init = true;

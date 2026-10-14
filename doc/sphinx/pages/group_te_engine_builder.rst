@@ -177,6 +177,181 @@ Please note that we do not specify value for source directory parameter, which m
 
 
 
+.. _doxid-group__te__engine__builder_1te_engine_builder_conf_file_te_ext_repo:
+
+TE_EXT_REPO
++++++++++++
+
+.. ref-code-block:: none
+
+	TE_EXT_REPO([repository name],
+	            [platform name],
+	            [git URL],
+	            [git reference],
+	            [list of libraries],
+	            [list of agent types])
+
+The TE_EXT_REPO directive declares an external git repository with TE libraries (TAPI, agent-side configuration subtrees, RPC implementations) that live outside the TE source tree.
+
+Before it builds the platforms, the Builder clones the repository into ${TE_BUILD}/ext-repos/[repository name] and checks out the requested reference (tag, commit hash or branch name) with a detached HEAD.
+
+A build does not move to a newer commit on its own. The Builder records the commit a reference resolved to in a lock file next to the Builder configuration file (conf/builder.conf.lock for conf/builder.conf), and each later build checks out the recorded commit, wherever the reference points upstream by then. This holds for branch names too: the Builder resolves a branch once, and the build changes only when the configuration changes. Each build prints the commit in use.
+
+The lock file belongs to the test suite; keep it under version control together with the Builder configuration file. A machine that has not built the suite before, such as a clean CI worker, checks out the suite, reads the recorded commits and builds the sources the previous run built. You may wipe a build tree at any time without a change to the commits in use.
+
+Moving to a newer commit is an explicit action: run dispatcher.sh with the --update-external option:
+
+.. ref-code-block:: none
+
+	./dispatcher.sh --update-external ...
+
+It re-resolves the references, rewrites the lock file and reports what moved and where. Commit the updated lock file along with the other changes of the suite, so that the rest of the team builds what you tested. A changed URL or reference in the Builder configuration file or in the catalog re-resolves that repository too, since that is a request for a different commit.
+
+You can also obtain the repositories on their own, without a build:
+
+.. ref-code-block:: none
+
+	./dispatcher.sh --fetch-external-only ...
+
+Use it where the build itself cannot authenticate to the git server, such as a container or a CI worker that gets no credentials on purpose. Run this step where the credentials are; the build that follows finds the sources locally and does not reach the network. With --update-external it moves the lock file on without a full build.
+
+The checkout directory outlives a build, so the Builder compares the declared URL with the origin of the existing clone. If the repository has moved, the Builder warns and points origin at the new URL, rather than fetch from the old one. It fetches and prunes the refs only when it has to resolve a reference against the new origin; a recorded commit that the clone has builds without a fetch, which matters when the new origin needs credentials the build does not have.
+
+The Builder keeps sources you edit in the checkout directory, so that you can debug an external library without leaving the build tree. While the requested commit is checked out, it warns and builds your local modifications as they are (tracked changes and untracked files; files matched by .gitignore do not count). Moving the checkout to another commit over such modifications is an error, and the error names the git command that discards them.
+
+The Builder reaches the network for the first clone of a repository and for a recorded commit the local clone does not have. A build that has both makes no network access.
+
+Each declared library is a subdirectory of the repository (with an empty list, the Builder treats the repository root as one library named after the repository). The Builder appends the libraries to the platform library list and copies their sources into the platform build workspace, so they build as subdirectories of ${TE_BASE}/lib. A library must therefore contain a meson.build that follows the contract of the ${TE_BASE}/lib/meson.build subdirectories: append its files to 'sources' and 'headers', list TE dependencies in 'te_libs', and so on.
+
+By default the Builder builds an external library as a static agent-side library. The library may override this in its meson.build:
+
+* 'build_lib_shared = true' / 'build_lib_static = false' together with 'install_lib = install_dev' turn it into an engine-side shared library (e.g. a TAPI used by test suites);
+
+* 'link_whole = true' makes agents link the whole library, which constructor-based registration needs (see below).
+
+For example, a repository with a TAPI library and an agent library:
+
+.. ref-code-block:: none
+
+	TE_EXT_REPO([wifi], [], [https://example.com/te-wifi.git], [v1.2.0],
+	            [tapi_cfg_wifi ta_wifi])
+	TE_EXT_REPO([wifi], [linux64], [https://example.com/te-wifi.git], [v1.2.0],
+	            [ta_wifi])
+
+A repository may also provide agent types (directories with a standalone meson.build, like the subdirectories of ${TE_BASE}/agents). List them in the sixth parameter (or in the 'agents' key of the catalog, see TE_EXT_REPO_USE) and name the directory in the sources parameter of TE_TA_TYPE:
+
+.. ref-code-block:: none
+
+	TE_EXT_REPO([my_agents], [p64], [https://example.com/te-agents.git],
+	            [v2.0], [], [riscv_agent])
+	TE_TA_TYPE([riscv64], [p64], [riscv_agent], [], [], [], [], [tools])
+
+The Builder passes the agent types to meson in two array options, both keyed by the agent directory: 'agent-ext-names' holds one '<agent-dir>:<ta-name>' entry per agent, and 'agent-ext-libs' one '<agent-dir>:<lib>' entry per extra library (the eighth TE_TA_TYPE parameter). The platform is a plain string option 'agent-ext-platform', as for the built-in agent types: the Builder configures meson once per platform, so the external agents of one invocation share it. The agent's meson.build picks its own entries and builds itself, for example:
+
+.. ref-code-block:: none
+
+	ext_name = ''
+	foreach e : get_option('agent-ext-names')
+	    f = e.split(':')
+	    if f[0] == 'riscv_agent'
+	        ext_name = f[1]
+	    endif
+	endforeach
+	ext_deps = []
+	foreach e : get_option('agent-ext-libs')
+	    f = e.split(':')
+	    if f[0] == 'riscv_agent'
+	        ext_deps += [ get_variable('dep_lib_static_' + f[1]) ]
+	    endif
+	endforeach
+	platform = get_option('agent-ext-platform')
+	executable('ta', files('main.c'), install: true,
+	           install_dir: join_paths(get_option('agentsdir'), ext_name),
+	           c_args: [ '-DTE_AGT_PLATFORM="' + platform + '"' ],
+	           dependencies: ext_deps)
+
+An agent-side library registers its configuration subtree through the rcfpch registry, without a change to the Test Agent sources (the library must set 'link_whole = true'):
+
+.. ref-code-block:: none
+
+	#include "rcf_pch_conf_ext.h"
+
+	static te_errno
+	my_conf_init(void)
+	{
+	    return rcf_pch_add_node("/agent", &node_my_subtree);
+	}
+
+	TE_RCF_PCH_CONF_EXT(my_conf_init);
+
+The agent sets up the built-in subtrees before it initializes any extension. The extensions themselves run in the order of their constructors, and that order depends on the linker and on the way the libraries are linked, so extensions must not depend on each other or on running first or last.
+
+This is the agent half of a configuration subtree. As with any subtree, the Configurator has to know the objects before a test can touch them, so the external library must also ship the model, a :ref:`Configurator <doxid-group__te__engine__conf>` YAML file that registers the same OIDs, and the test suite has to include it in its Configurator configuration file. Tests cannot see a subtree that the agent adds and the engine side does not register.
+
+The agent logs the number of registered extensions at the start of the configuration initialization. Zero where you expected some means, as a rule, that a library was linked without 'link_whole = true' and the linker dropped the object file with the constructor.
+
+Add RPC definitions shipped in the repository with the usual TE_LIB_PARMS directive for rpcxdr; reference them relative to ${TE_BASE}/lib/rpcxdr, so that the path stays valid inside build workspaces (the workspace holds external library sources under lib/[library name]):
+
+.. ref-code-block:: none
+
+	TE_LIB_PARMS([rpcxdr], [linux64], [],
+	             [--with-rpcdefs=../ta_wifi/wifi_rpc.x.m4])
+
+
+
+
+
+.. _doxid-group__te__engine__builder_1te_engine_builder_conf_file_te_ext_repo_use:
+
+TE_EXT_REPO_USE
++++++++++++++++
+
+.. ref-code-block:: none
+
+	TE_EXT_REPO_USE([repository name],
+	                [platform name],
+	                [list of libraries])
+
+TE_EXT_REPO_USE binds libraries of an external repository declared in a catalog to a platform. The git URL and the reference come from the catalog, so a test suite chooses only which libraries go to which platforms, and the catalog manages the versions in one place.
+
+The catalog is a YAML file; pass it to dispatcher.sh with the --external option (the option may be repeated; dispatcher.sh resolves relative paths against the configuration directories):
+
+.. ref-code-block:: none
+
+	./dispatcher.sh --external=external.yml ...
+
+Catalog format:
+
+.. ref-code-block:: none
+
+	repositories:
+	  - name: tsf_wifi
+	    url: https://example.com/tsf-wifi.git
+	    ref: v1.2.0
+	    libs:
+	      - tapi_cfg_wifi
+	      - ta_wifi
+	  - name: my_agents
+	    url: https://example.com/te-agents.git
+	    ref: v2.0
+	    agents:
+	      - riscv_agent
+
+'libs' lists the libraries the repository provides; it may be omitted, and the Builder then treats the repository root as one library named after the repository, unless 'agents' is given. 'agents' lists agent type directories; TE_TA_TYPE can name them once the repository is used (see TE_EXT_REPO for the agent meson.build contract). A parser built into the Builder reads the catalog, so TE builds without a YAML library. The parser understands the block subset shown above and refuses the rest (flow collections, anchors, tags, block scalars, multiple documents), so that a catalog reads the same way here and in a full YAML reader.
+
+With the catalog above, a Builder configuration file may contain:
+
+.. ref-code-block:: none
+
+	TE_EXT_REPO_USE([tsf_wifi], [], [tapi_cfg_wifi])
+	TE_EXT_REPO_USE([tsf_wifi], [linux64], [])
+
+An empty list of libraries means all libraries the repository provides. A library the repository does not provide, or a repository absent from the catalog, is a configuration error. The Builder fetches only the repositories some platform uses.
+
+
+
+
+
 .. _doxid-group__te__engine__builder_1te_engine_builder_conf_file_te_ta_type:
 
 TE_TA_TYPE
