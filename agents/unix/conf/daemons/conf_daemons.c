@@ -274,6 +274,7 @@ ds_create_backup(const char *dir, const char *name, int *index)
         WARN("Failed to create backup for %s - no such file",
              ds[i].config_file);
         free(ds[i].config_file);
+        ds[i].config_file = NULL;
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
     }
     fclose(f);
@@ -287,7 +288,9 @@ ds_create_backup(const char *dir, const char *name, int *index)
     if ((rc = copy_or_rename(ds[i].config_file, ds[i].backup)) != 0)
     {
         free(ds[i].config_file);
+        ds[i].config_file = NULL;
         free(ds[i].backup);
+        ds[i].backup = NULL;
         return rc;
     }
 
@@ -687,13 +690,10 @@ ds_xinetd_service_addr_set(const char *service, const char *value)
     int        rc;
 
     if (inet_aton(value, (struct in_addr *)&addr) == 0)
-        return TE_EINVAL;
+        return TE_RC(TE_TA_UNIX, TE_EINVAL);
 
     if (index < 0)
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
-
-    if (strlen(value) != 1 || (*value != '0' && *value != '1'))
-        return TE_RC(TE_TA_UNIX, TE_EINVAL);
 
     if ((f = fopen(ds_backup(index), "r")) == NULL)
     {
@@ -889,6 +889,8 @@ echoserver_release(const char *name)
         return 0;
     ds_restore_backup(echo_index);
     ta_system("/etc/init.d/xinetd restart >/dev/null");
+
+    return 0;
 }
 
 #endif /* WITH_ECHO_SERVER */
@@ -972,6 +974,8 @@ todudpserver_release(const char *name)
         return 0;
     ds_restore_backup(todudp_index);
     ta_system("/etc/init.d/xinetd restart >/dev/null");
+
+    return 0;
 }
 
 
@@ -1829,8 +1833,8 @@ ftpserver_grab(const char *name)
 #ifdef WITH_XINETD
     if (file_exists(XINETD_ETC_DIR "ftp"))
     {
-        ftp_register |= ds_create_backup(XINETD_ETC_DIR, "ftp",
-                                         &ftp_xinetd_index);
+        ftp_register |= (ds_create_backup(XINETD_ETC_DIR, "ftp",
+                                          &ftp_xinetd_index) == 0);
     }
 #endif
 
@@ -1891,12 +1895,15 @@ ftpserver_release(const char *name)
     {
         if (ftp_indices[i] != -1)
             ds_restore_backup(ftp_indices[i]);
+        /* The slot is free now and may go to another service */
+        ftp_indices[i] = -1;
     }
 
 #ifdef WITH_XINETD
     if (ftp_xinetd_index != -1)
     {
         ds_restore_backup(ftp_xinetd_index);
+        ftp_xinetd_index = -1;
         ta_system("/etc/init.d/xinetd restart >/dev/null");
     }
 #endif
@@ -1918,7 +1925,7 @@ ftpserver_release(const char *name)
 #define SMTP_EMPTY_SMARTHOST    "0.0.0.0"
 
 /** /etc/hosts backup index */
-static int hosts_index;
+static int hosts_index = -1;
 
 /** Index of smarthost name: te_tester<index> */
 static unsigned int smarthost_name_index = 0;
@@ -2829,6 +2836,15 @@ smtp_release(const char *name)
     free(smtp_current_smarthost);
     smtp_current_smarthost = NULL;
 
+    /* The backup slots are free now and may go to other services */
+    hosts_index = -1;
+    sendmail_index = -1;
+#if defined __linux__
+    exim_index = -1;
+    postfix_index = -1;
+    qmail_index = -1;
+#endif
+
     return 0;
 }
 
@@ -3123,7 +3139,11 @@ sshd_exists(char *port)
     {
         char *tmp = strstr(line, "sshd");
 
-        tmp = strstr(tmp, "-p") + 2;
+        /* A ps line longer than the buffer comes in pieces */
+        if (tmp == NULL || (tmp = strstr(tmp, "-p")) == NULL)
+            continue;
+
+        tmp += 2;
         while (*++tmp == ' ');
 
         if (strncmp(tmp, port, len) == 0 && !isdigit(*(tmp + len)))
@@ -3247,7 +3267,11 @@ ds_sshd_list(unsigned int gid, const char *oid,
     {
         char *tmp = strstr(line, "sshd");
 
-        tmp = strstr(tmp, "-p") + 2;
+        /* A ps line longer than the buffer comes in pieces */
+        if (tmp == NULL || (tmp = strstr(tmp, "-p")) == NULL)
+            continue;
+
+        tmp += 2;
         while (*++tmp == ' ');
 
         s += sprintf(s, "%u ", atoi(tmp));
