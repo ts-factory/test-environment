@@ -324,7 +324,7 @@ vm_append_vhost_user_interface_cmd(te_string *cmd, struct vm_net_entry *net,
 
     te_kvpair_to_str_gen(&net->netdev_opts, ",", &opts);
     te_string_append(&netdev,
-                     "type=vhost-user,id=netdev%u,chardev=%s,vhostforce",
+                     "type=vhost-user,id=netdev%u,chardev=%s,vhostforce%s%s",
                      interface_id, net->type_spec,
                      te_str_is_null_or_empty(opts.ptr) ? "" : ",",
                      te_str_is_null_or_empty(opts.ptr) ? "" : opts.ptr);
@@ -758,6 +758,8 @@ vm_chardev_free(struct vm_chardev_entry *chardev)
 static void
 vm_net_free(struct vm_net_entry *net)
 {
+    te_kvpair_fini(&net->netdev_opts);
+    te_kvpair_fini(&net->device_opts);
     free(net->name);
     free(net->type);
     free(net->type_spec);
@@ -815,6 +817,7 @@ vm_virtfs_free(struct vm_virtfs_entry *vfs)
     free(vfs->path);
     free(vfs->security_model);
     free(vfs->name);
+    free(vfs);
 }
 
 static void
@@ -837,6 +840,8 @@ vm_device_free(struct vm_device_entry *dev)
 static void
 vm_free(struct vm_entry *vm)
 {
+    struct vm_chardev_entry *chardev;
+    struct vm_chardev_entry *chardev_tmp;
     struct vm_net_entry *net;
     struct vm_net_entry *net_tmp;
     struct vm_drive_entry *drive;
@@ -847,6 +852,12 @@ vm_free(struct vm_entry *vm)
     struct vm_pci_pt_entry *pci_pt_tmp;
     struct vm_device_entry *device;
     struct vm_device_entry *device_tmp;
+
+    SLIST_FOREACH_SAFE(chardev, &vm->chardevs, links, chardev_tmp)
+    {
+        SLIST_REMOVE(&vm->chardevs, chardev, vm_chardev_entry, links);
+        vm_chardev_free(chardev);
+    }
 
     SLIST_FOREACH_SAFE(net, &vm->nets, links, net_tmp)
     {
@@ -862,7 +873,7 @@ vm_free(struct vm_entry *vm)
 
     SLIST_FOREACH_SAFE(virtfs, &vm->virtfses, links, virtfs_tmp)
     {
-        SLIST_REMOVE(&vm->virtfses, drive, vm_virtfs_entry, links);
+        SLIST_REMOVE(&vm->virtfses, virtfs, vm_virtfs_entry, links);
         vm_virtfs_free(virtfs);
     }
 
@@ -882,6 +893,7 @@ vm_free(struct vm_entry *vm)
     agent_free_l4_port(vm->host_ssh_port);
 
     te_string_free(&vm->cmd);
+    te_string_free(&vm->cpu.model);
     free(vm->mem_path);
     free(vm->mgmt_net_device);
     free(vm->machine);
@@ -1222,25 +1234,26 @@ static uint16_t *
 vm_port_ptr_by_oid(struct vm_entry *vm, const char *oid)
 {
     cfg_oid *coid = cfg_convert_oid_str(oid);
+    uint16_t *result = NULL;
 
     if (coid == NULL)
         return NULL;
 
     if (strcmp(cfg_oid_inst_subid(coid, 3), "rcf_port") == 0)
     {
-        return &vm->rcf_port;
+        result = &vm->rcf_port;
     }
     else if (strcmp(cfg_oid_inst_subid(coid, 3), "ssh_port") == 0)
     {
         if (strcmp(cfg_oid_inst_subid(coid, 4), "host") == 0)
-            return &vm->host_ssh_port;
+            result = &vm->host_ssh_port;
         else if (strcmp(cfg_oid_inst_subid(coid, 4), "guest") == 0)
-            return &vm->guest_ssh_port;
-        else
-            return NULL;
+            result = &vm->guest_ssh_port;
     }
-    else
-        return NULL;
+
+    cfg_free_oid(coid);
+
+    return result;
 }
 
 static te_errno
@@ -1703,9 +1716,6 @@ vm_net_del(unsigned int gid, const char *oid,
 
     SLIST_REMOVE(&vm->nets, net, vm_net_entry, links);
 
-    te_kvpair_fini(&net->netdev_opts);
-    te_kvpair_fini(&net->device_opts);
-
     vm_net_free(net);
 
     return 0;
@@ -1911,7 +1921,7 @@ vm_net_opt_add(unsigned int gid, const char *oid, char *value,
 }
 
 static te_errno
-vm_net_opt_del(unsigned int gid, const char *oid, char *value,
+vm_net_opt_del(unsigned int gid, const char *oid,
                const char *vm_name, const char *net_name,
                const char *opt_name)
 {
@@ -2075,7 +2085,7 @@ vm_kernel_get(unsigned int gid, const char *oid, char *value,
     if (vm == NULL)
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
 
-    snprintf(value, RCF_MAX_VAL, "%s", vm->kernel);
+    snprintf(value, RCF_MAX_VAL, "%s", te_str_empty_if_null(vm->kernel));
 
     return 0;
 }
@@ -2116,7 +2126,7 @@ vm_ker_cmd_get(unsigned int gid, const char *oid, char *value,
     if (vm == NULL)
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
 
-    snprintf(value, RCF_MAX_VAL, "%s", vm->ker_cmd);
+    snprintf(value, RCF_MAX_VAL, "%s", te_str_empty_if_null(vm->ker_cmd));
 
     return 0;
 }
@@ -2157,7 +2167,7 @@ vm_ker_initrd_get(unsigned int gid, const char *oid, char *value,
     if (vm == NULL)
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
 
-    snprintf(value, RCF_MAX_VAL, "%s", vm->ker_initrd);
+    snprintf(value, RCF_MAX_VAL, "%s", te_str_empty_if_null(vm->ker_initrd));
 
     return 0;
 }
@@ -2198,7 +2208,7 @@ vm_ker_dtb_get(unsigned int gid, const char *oid, char *value,
     if (vm == NULL)
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
 
-    snprintf(value, RCF_MAX_VAL, "%s", vm->ker_dtb);
+    snprintf(value, RCF_MAX_VAL, "%s", te_str_empty_if_null(vm->ker_dtb));
 
     return 0;
 }
@@ -2239,7 +2249,7 @@ vm_serial_get(unsigned int gid, const char *oid, char *value,
     if (vm == NULL)
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
 
-    snprintf(value, RCF_MAX_VAL, "%s", vm->serial);
+    snprintf(value, RCF_MAX_VAL, "%s", te_str_empty_if_null(vm->serial));
 
     return 0;
 }
@@ -2369,7 +2379,7 @@ vm_file_get(unsigned int gid, const char *oid, char *value,
     if (drive == NULL)
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
 
-    snprintf(value, RCF_MAX_VAL, "%s", drive->file.ptr);
+    snprintf(value, RCF_MAX_VAL, "%s", te_string_value(&drive->file));
 
     return 0;
 }
@@ -2591,7 +2601,7 @@ vm_virtfs_fsdriver_get(unsigned int gid, const char *oid, char *value,
     if (virtfs == NULL)
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
 
-    snprintf(value, RCF_MAX_VAL, "%s", virtfs->fsdriver);
+    snprintf(value, RCF_MAX_VAL, "%s", te_str_empty_if_null(virtfs->fsdriver));
 
     return 0;
 }
@@ -2633,7 +2643,7 @@ vm_virtfs_mount_tag_get(unsigned int gid, const char *oid, char *value,
     if (virtfs == NULL)
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
 
-    snprintf(value, RCF_MAX_VAL, "%s", virtfs->mount_tag);
+    snprintf(value, RCF_MAX_VAL, "%s", te_str_empty_if_null(virtfs->mount_tag));
 
     return 0;
 }
@@ -2675,7 +2685,7 @@ vm_virtfs_path_get(unsigned int gid, const char *oid, char *value,
     if (virtfs == NULL)
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
 
-    snprintf(value, RCF_MAX_VAL, "%s", virtfs->path);
+    snprintf(value, RCF_MAX_VAL, "%s", te_str_empty_if_null(virtfs->path));
 
     return 0;
 }
@@ -2717,7 +2727,8 @@ vm_virtfs_security_model_get(unsigned int gid, const char *oid, char *value,
     if (virtfs == NULL)
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
 
-    snprintf(value, RCF_MAX_VAL, "%s", virtfs->security_model);
+    snprintf(value, RCF_MAX_VAL, "%s",
+             te_str_empty_if_null(virtfs->security_model));
 
     return 0;
 }
@@ -2819,6 +2830,9 @@ vm_pci_pt_add(unsigned int gid, const char *oid, char *value,
 
     if (vm_is_running(vm))
         return TE_RC(TE_TA_UNIX, TE_EBUSY);
+
+    if (vm_pci_pt_find(vm, pci_pt_name) != NULL)
+        return TE_RC(TE_TA_UNIX, TE_EEXIST);
 
     pt = TE_ALLOC(sizeof(*pt));
 
@@ -2966,6 +2980,9 @@ vm_device_add(unsigned int gid, const char *oid, const char *value,
 
     if (vm_is_running(vm))
         return TE_RC(TE_TA_UNIX, TE_EBUSY);
+
+    if (vm_device_find(vm, device_name) != NULL)
+        return TE_RC(TE_TA_UNIX, TE_EEXIST);
 
     dev = TE_ALLOC(sizeof(*dev));
 
