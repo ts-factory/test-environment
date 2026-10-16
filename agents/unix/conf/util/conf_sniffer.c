@@ -310,6 +310,8 @@ sniffer_cleanup(sniffer_t *sniff)
         free(sniff->id.ifname);
     if (sniff->curr_file_name != NULL)
         free(sniff->curr_file_name);
+    free(sniff->filter_exp_str);
+    free(sniff->filter_exp_file);
 
     /* Clean up the sniffer directory */
     if (strlen(sniff->path) > 0)
@@ -482,7 +484,7 @@ sniffer_common_get(unsigned int gid, const char *oid, char *value,
     if (sniff == NULL)
     {
         ERROR("sniffer_common_get: Couldn't find the sniffer for oid %s", oid);
-        return TE_RC(TE_TA_UNIX, TE_EINVAL);
+        return TE_RC(TE_TA_UNIX, TE_ENOENT);
     }
 
     if (value == NULL)
@@ -536,7 +538,7 @@ sniffer_common_set(unsigned int gid, const char *oid, const char *value,
     if (sniff == NULL)
     {
         ERROR("Couldn't find the sniffer on the oid %s", oid);
-        return TE_RC(TE_TA_UNIX, TE_EINVAL);
+        return TE_RC(TE_TA_UNIX, TE_ENOENT);
     }
 
     if (value == NULL)
@@ -1181,6 +1183,7 @@ make_argv_str(sniffer_t *sniff, int *s_argc)
         *s_argc += 1;
     }
 
+    free(int_buff);
     return s_argv;
 cleanup_m_argv:
     ERROR("Filed make_argv_str");
@@ -1265,6 +1268,7 @@ sniffer_start_process(sniffer_t *sniff)
     char      **s_argv;
     char       *te_snif_path = SNIFFER_EXEC;
     te_errno    rc           = 0;
+    int         i;
 
     rc = sniffer_make_dir(sniff);
     if (rc != 0)
@@ -1277,8 +1281,14 @@ sniffer_start_process(sniffer_t *sniff)
     if ((s_argv == NULL) || (s_argc == 0))
         return TE_RC(TE_TA_UNIX, TE_EINVAL);
 
-    if ((rc = rcf_ch_start_process(&sniff->pid, -1, te_snif_path, true,
-                                   s_argc, (void **)s_argv)) != 0)
+    rc = rcf_ch_start_process(&sniff->pid, -1, te_snif_path, true,
+                              s_argc, (void **)s_argv);
+
+    for (i = 0; i < s_argc; i++)
+        free(s_argv[i]);
+    free(s_argv);
+
+    if (rc != 0)
     {
         ERROR("Start the sniffer process failed.");
         return TE_RC(TE_TA_UNIX, TE_ESHCMD);
@@ -1333,6 +1343,7 @@ sniffer_set_enable(unsigned int gid, const char *oid, const char *value,
 {
     sniffer_t    *sniff;
     int           enable;
+    te_errno      rc;
 
     UNUSED(gid);
 
@@ -1340,7 +1351,7 @@ sniffer_set_enable(unsigned int gid, const char *oid, const char *value,
     if (sniff == NULL)
     {
         ERROR("Couldn't find the sniffer on the oid %s.", oid);
-        return TE_RC(TE_TA_UNIX, TE_EINVAL);
+        return TE_RC(TE_TA_UNIX, TE_ENOENT);
     }
 
     if (value == NULL)
@@ -1360,15 +1371,16 @@ sniffer_set_enable(unsigned int gid, const char *oid, const char *value,
 
     if (enable == 1)
     {
-        if (sniffer_start_process(sniff) == 0)
+        rc = sniffer_start_process(sniff);
+        if (rc != 0)
         {
-            snif_sets.lock = true;
-            sniff->enable = true;
-            sniff->state |= SNIF_ST_START;
-        }
-        else
             WARN("Couldn't start the sniffer process: %s_%s_%d.",
                  ifname, snifname, sniff->id.ssn);
+            return rc;
+        }
+        snif_sets.lock = true;
+        sniff->enable = true;
+        sniff->state |= SNIF_ST_START;
     }
     else if (enable == 0)
     {
@@ -1447,7 +1459,7 @@ sniffer_get(unsigned int gid, const char *oid, char *value,
     if (sniff == NULL)
     {
         ERROR("sniffer_get: Couldn't find the sniffer, oid %s", oid);
-        return TE_RC(TE_TA_UNIX, TE_EINVAL);
+        return TE_RC(TE_TA_UNIX, TE_ENOENT);
     }
 
     if (value == NULL)
@@ -1537,8 +1549,12 @@ sniffer_check_exst_backup(sniffer_t *sniff)
     sniff->curr_file_name = sniffer_get_capture_fname(sniff, &fnum,
                                                       &wp_fname, false);
     if (sniff->curr_file_name == NULL)
+    {
+        free(wp_fname);
         return false;
+    }
     sniff->id.abs_offset = strtoll(wp_fname, NULL, 10);
+    free(wp_fname);
     sniff->curr_offset = SNIF_PCAP_HSIZE;
     sniff->state |= SNIF_ST_START;
 
@@ -1565,6 +1581,9 @@ sniffer_add(unsigned int gid, const char *oid, char *ssn,
 
     sniffer_t *sniff;
     bool backup = false;
+
+    if (sniffer_find(ifname, snifname) != NULL)
+        return TE_RC(TE_TA_UNIX, TE_EEXIST);
 
     sniff = TE_ALLOC(sizeof(sniffer_t));
     sniff->id.snifname      = strdup(snifname);
@@ -1619,6 +1638,12 @@ sniffer_add(unsigned int gid, const char *oid, char *ssn,
     if (sniffer_get_ssn_ff(snif_sets.ssn_fname) != 0)
     {
         ERROR("Couldn't get SSN from the file %s", snif_sets.ssn_fname);
+        free(sniff->id.snifname);
+        free(sniff->id.ifname);
+        free(sniff->filter_exp_file);
+        free(sniff->filter_exp_str);
+        free(sniff->curr_file_name);
+        free(sniff);
         return TE_RC(TE_TA_UNIX, TE_EINVAL);
     }
     sniff->id.ssn = snif_sets.ssn;
@@ -1652,7 +1677,7 @@ sniffer_del(unsigned int gid, const char *oid, const char *ifname,
     if (sniff == NULL)
     {
         ERROR("sniffer_del: Couldn't find the sniffer, oid %s", oid);
-        return TE_RC(TE_TA_UNIX, TE_EINVAL);
+        return TE_RC(TE_TA_UNIX, TE_ENOENT);
     }
 
     if (sniff->enable == 1)
