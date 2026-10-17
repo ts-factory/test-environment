@@ -71,6 +71,11 @@ console_add(unsigned int gid, const char *oid, const char *cname,
     UNUSED(gid);
     UNUSED(oid);
 
+    if (strlen(inst_name) > TE_SERIAL_MAX_NAME)
+        return TE_RC(TE_TA_UNIX, TE_ENAMETOOLONG);
+    if (console_get_by_name(inst_name) != NULL)
+        return TE_RC(TE_TA_UNIX, TE_EEXIST);
+
     console = TE_ALLOC_UNINITIALIZED(sizeof(serial_console_t));
     console->port                           = TE_SERIAL_PORT;
     te_strlcpy(console->inst_name, inst_name, sizeof(console->inst_name));
@@ -241,7 +246,11 @@ console_common_set(unsigned int gid, const char *oid, const char *value,
     }
     else if (strstr(oid, "/address:") != NULL)
     {
-        rc = te_sockaddr_str2h(value, SA(&console->address));
+        struct sockaddr_storage addr = console->address;
+
+        rc = te_sockaddr_str2h(value, SA(&addr));
+        if (rc == 0)
+            console->address = addr;
     }
     else
     {

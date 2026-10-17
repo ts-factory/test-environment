@@ -258,7 +258,7 @@ route_load_attrs(ta_cfg_obj_t *obj)
     do {                                                      \
         snprintf(val, sizeof(val), "%d", rt_info->field_);    \
         if (rt_info->flags & TA_RT_INFO_FLG_ ## field_flg_ && \
-            (rc = ta_obj_attr_set(obj, #field_, val) != 0))   \
+            (rc = ta_obj_attr_set(obj, #field_, val)) != 0)   \
         {                                                     \
             return rc;                                        \
         }                                                     \
@@ -284,7 +284,7 @@ route_load_attrs(ta_cfg_obj_t *obj)
     }
 
     if (rt_info->flags & TA_RT_INFO_FLG_SRC &&
-            (rc = ta_obj_attr_set(obj, "src", val) != 0))
+            (rc = ta_obj_attr_set(obj, "src", val)) != 0)
     {
         ERROR("Invalid source address");
         return rc;
@@ -655,8 +655,11 @@ blackhole_commit(unsigned int gid, const cfg_oid *p_oid)
         rt_info.type != TA_RT_TYPE_PROHIBIT &&
         rt_info.type != TA_RT_TYPE_THROW)
     {
-        ERROR("Blackhole route type '%s' is not supported yet", rt_info.type);
-        return TE_RC(TE_TAPI, TE_EINVAL);
+        ERROR("Blackhole route type '%s' is not supported yet",
+              ta_rt_type2name(rt_info.type));
+        ta_obj_free(obj);
+        ta_rt_info_clean(&rt_info);
+        return TE_RC(TE_TA_UNIX, TE_EINVAL);
     }
 
     obj_action = obj->action;
@@ -1145,7 +1148,10 @@ route_nexthop_dev_set(unsigned int gid, const char *oid,
 
     val_len = strnlen(value, RCF_MAX_VAL);
     if (val_len > sizeof(rt_nh->ifname) - 1)
+    {
         ERROR("%s(): interface name is too long", __FUNCTION__);
+        return TE_RC(TE_TA_UNIX, TE_ENAMETOOLONG);
+    }
 
     strcpy(rt_nh->ifname, value);
 
@@ -1208,7 +1214,7 @@ route_nexthop_weight_set(unsigned int gid, const char *oid,
     {
         ERROR("%s(): failed to convert '%s' to correct nexthop weight",
               __FUNCTION__, value);
-        return TE_RC(TE_TA_UNIX, rc);
+        return TE_RC(TE_TA_UNIX, rc != 0 ? rc : TE_EINVAL);
     }
 
     rc = route_nexthop_set_find(gid, route, hop_id, NULL, &rt_nh);

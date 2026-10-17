@@ -244,7 +244,7 @@ sniffer_agent_id_init(void)
 
     res = snprintf(snif_sets.ta_path, RCF_MAX_PATH, "%s%s", SNIFFER_PATH,
                    snif_sets.agt_id);
-    if (res > RCF_MAX_PATH)
+    if (res >= RCF_MAX_PATH)
     {
         ERROR("Sniffers path is too long.");
         return TE_RC(TE_TA_UNIX, TE_EINVAL);
@@ -253,7 +253,7 @@ sniffer_agent_id_init(void)
 
     res = snprintf(snif_sets.ssn_fname, RCF_MAX_PATH, "%s/%s_%s",
                    snif_sets.ta_path, ta_name, SNIFFER_SSN_F);
-    if (res > RCF_MAX_PATH)
+    if (res >= RCF_MAX_PATH)
     {
         ERROR("Too long agent ssn file name");
         return TE_RC(TE_TA_UNIX, TE_EINVAL);
@@ -280,8 +280,8 @@ sniffer_settings_init(void)
     snif_sets.file_size         = SNIFFER_FILE_SIZE;
     snif_sets.overfill_meth     = ROTATION;
     snif_sets.rotation          = SNIFFER_ROTATION;
-    snif_sets.filter_exp_str    = strdup("");
-    snif_sets.filter_exp_file   = strdup("");
+    snif_sets.filter_exp_str    = TE_STRDUP("");
+    snif_sets.filter_exp_file   = TE_STRDUP("");
 
     SLIST_INIT(&snifferl_h);
 
@@ -310,6 +310,8 @@ sniffer_cleanup(sniffer_t *sniff)
         free(sniff->id.ifname);
     if (sniff->curr_file_name != NULL)
         free(sniff->curr_file_name);
+    free(sniff->filter_exp_str);
+    free(sniff->filter_exp_file);
 
     /* Clean up the sniffer directory */
     if (strlen(sniff->path) > 0)
@@ -445,15 +447,13 @@ sniffer_set_params(unsigned int gid, const char *oid, const char *value)
     {
         if (snif_sets.filter_exp_str != NULL)
             free(snif_sets.filter_exp_str);
-        if ((snif_sets.filter_exp_str = strdup(value)) == NULL)
-            return TE_RC(TE_TA_UNIX, TE_ENOMEM);
+        snif_sets.filter_exp_str = TE_STRDUP(value);
     }
     else if (strstr(oid, "/filter_exp_file:") != NULL)
     {
         if (snif_sets.filter_exp_file != NULL)
             free(snif_sets.filter_exp_file);
-        if ((snif_sets.filter_exp_file = strdup(value)) == NULL)
-            return TE_RC(TE_TA_UNIX, TE_ENOMEM);
+        snif_sets.filter_exp_file = TE_STRDUP(value);
     }
 
     return 0;
@@ -482,7 +482,7 @@ sniffer_common_get(unsigned int gid, const char *oid, char *value,
     if (sniff == NULL)
     {
         ERROR("sniffer_common_get: Couldn't find the sniffer for oid %s", oid);
-        return TE_RC(TE_TA_UNIX, TE_EINVAL);
+        return TE_RC(TE_TA_UNIX, TE_ENOENT);
     }
 
     if (value == NULL)
@@ -536,7 +536,7 @@ sniffer_common_set(unsigned int gid, const char *oid, const char *value,
     if (sniff == NULL)
     {
         ERROR("Couldn't find the sniffer on the oid %s", oid);
-        return TE_RC(TE_TA_UNIX, TE_EINVAL);
+        return TE_RC(TE_TA_UNIX, TE_ENOENT);
     }
 
     if (value == NULL)
@@ -570,25 +570,38 @@ sniffer_common_set(unsigned int gid, const char *oid, const char *value,
     {
         if (sniff->filter_exp_str != NULL)
             free(sniff->filter_exp_str);
-        if ((sniff->filter_exp_str = strdup(value)) == NULL)
-            return TE_RC(TE_TA_UNIX, TE_ENOMEM);
+        sniff->filter_exp_str = TE_STRDUP(value);
     }
     else if (strstr(oid, "/filter_exp_file:") != NULL)
     {
         if (sniff->filter_exp_file != NULL)
             free(sniff->filter_exp_file);
-        if ((sniff->filter_exp_file = strdup(value)) == NULL)
-            return TE_RC(TE_TA_UNIX, TE_ENOMEM);
+        sniff->filter_exp_file = TE_STRDUP(value);
     }
 
     return 0;
 }
 
 /**
+ * Free the names in a sniffer ID filled by sniffer_parse_sniff_id().
+ *
+ * @param id    The sniffer ID.
+ */
+static void
+sniffer_id_free_names(sniffer_id *id)
+{
+    free(id->snifname);
+    id->snifname = NULL;
+    free(id->ifname);
+    id->ifname = NULL;
+}
+
+/**
  * Parse the buffer with sniffer ID.
  *
  * @param buf   The buffer with sniffer ID.
- * @param id    The sniffer ID (OUT).
+ * @param id    The sniffer ID (OUT); on success, the caller frees its
+ *              names with sniffer_id_free_names().
  *
  * return Status code.
  */
@@ -608,6 +621,9 @@ sniffer_parse_sniff_id(const char* buf, sniffer_id *id)
         while (*(_ptr) == ' ')  \
             (_ptr)++;
 
+    id->snifname = NULL;
+    id->ifname = NULL;
+
     if (buf == NULL)
         return TE_RC(TE_TA_UNIX, TE_EINVAL);
 
@@ -619,7 +635,7 @@ sniffer_parse_sniff_id(const char* buf, sniffer_id *id)
         return TE_RC(TE_TA_UNIX, TE_EINVAL);
     }
     strl = ptr - buf;
-    id->snifname = strndup(buf, strl);
+    id->snifname = TE_STRNDUP(buf, strl);
     buf = ptr;
 
     SNIF_SK_SPS(buf);
@@ -627,10 +643,11 @@ sniffer_parse_sniff_id(const char* buf, sniffer_id *id)
     if (ptr == NULL)
     {
         WARN("Wrong sniffer interface name in the sniffer id.");
+        sniffer_id_free_names(id);
         return TE_RC(TE_TA_UNIX, TE_EINVAL);
     }
     strl = ptr - buf;
-    id->ifname = strndup(buf, strl);
+    id->ifname = TE_STRNDUP(buf, strl);
     buf = ptr;
 
     SNIF_SK_SPS(buf);
@@ -638,6 +655,7 @@ sniffer_parse_sniff_id(const char* buf, sniffer_id *id)
     if (buf == endptr)
     {
         WARN("Wrong sniffer SSN in the sniffer id.");
+        sniffer_id_free_names(id);
         return TE_RC(TE_TA_UNIX, TE_EINVAL);
     }
 
@@ -714,8 +732,7 @@ sniffer_get_capture_fname(sniffer_t *snif, int *fnum, char **wp_fname,
         *fnum += 1;
         if (fl)
         {
-            if((fname = strdup(ent->d_name)) == NULL)
-                return NULL;
+            fname = TE_STRDUP(ent->d_name);
             fl = false;
             continue;
         }
@@ -724,8 +741,7 @@ sniffer_get_capture_fname(sniffer_t *snif, int *fnum, char **wp_fname,
             ((strcmp(fname, ent->d_name) < 0) && newest))
         {
             free(fname);
-            if((fname = strdup(ent->d_name)) == NULL)
-                return NULL;
+            fname = TE_STRDUP(ent->d_name);
         }
     }
 
@@ -733,15 +749,16 @@ sniffer_get_capture_fname(sniffer_t *snif, int *fnum, char **wp_fname,
 
     if (fname != NULL)
     {
-        *wp_fname = fname;
         resname = TE_ALLOC(RCF_MAX_PATH);
         res = snprintf(resname, RCF_MAX_PATH, "%s/%s", snif->path, fname);
-        if (res > RCF_MAX_PATH)
+        if (res >= RCF_MAX_PATH)
         {
             WARN("Too long file name string for sniffer cpture file.");
             free(resname);
+            free(fname);
             return NULL;
         }
+        *wp_fname = fname;
     }
 
     return resname;
@@ -766,7 +783,7 @@ sniffer_get_curr_offset(const char *sniff_id_str, void *snif_arg,
     int              rc;
     char            *fname;
     struct flock     lock;
-    int              fd;
+    int              fd = -1;
     sniffer_t       *snif;
     int              fnum;
     char            *wp_fname = NULL;
@@ -778,7 +795,9 @@ sniffer_get_curr_offset(const char *sniff_id_str, void *snif_arg,
     {
         if ((rc = sniffer_parse_sniff_id(sniff_id_str, &id)) != 0)
             return rc;
-        if ((snif = sniffer_find_by_id(&id)) == NULL)
+        snif = sniffer_find_by_id(&id);
+        sniffer_id_free_names(&id);
+        if (snif == NULL)
         {
             WARN("Couldn't find the sniffer to get offset.");
             return TE_RC(TE_TA_UNIX, TE_EINVAL);
@@ -799,18 +818,19 @@ sniffer_get_curr_offset(const char *sniff_id_str, void *snif_arg,
     lock.l_start = 0;
     lock.l_len = 0;
 
+    rc = TE_RC(TE_TA_UNIX, TE_EINVAL);
+
     fd = open(fname, O_RDWR);
     if (fd == -1)
     {
         WARN("Couldn't open the capture log file: %s.", fname);
-        return TE_RC(TE_TA_UNIX, TE_EINVAL);
+        goto out;
     }
 
-    rc = fcntl(fd, F_SETLKW, &lock);
-    if (rc != 0)
+    if (fcntl(fd, F_SETLKW, &lock) != 0)
     {
         WARN("Couldn't to lock the capture log file: %s.", fname);
-        return TE_RC(TE_TA_UNIX, TE_EINVAL);
+        goto out;
     }
     res = lseek(fd, 0, SEEK_END);
     if (res <= 0)
@@ -818,26 +838,26 @@ sniffer_get_curr_offset(const char *sniff_id_str, void *snif_arg,
     else
         *offset = res - SNIF_PCAP_HSIZE;
     lock.l_type = F_UNLCK;
-    rc = fcntl(fd, F_SETLK, &lock);
-    if (rc != 0)
+    if (fcntl(fd, F_SETLK, &lock) != 0)
     {
         WARN("Couldn't to unlock the capture log file: %s.", fname);
-        return TE_RC(TE_TA_UNIX, TE_EINVAL);
+        goto out;
     }
-    close(fd);
 
     *offset += strtoll(wp_fname, NULL, 10);
-
-    if (wp_fname != NULL)
-        free(wp_fname);
-    if (fname != NULL)
-        free(fname);
 
     if (*offset > snif->id.abs_offset)
         snif->state |= SNIF_ST_HAS_L;
     else
         snif->state &= ~SNIF_ST_HAS_L;
-    return 0;
+    rc = 0;
+
+out:
+    if (fd >= 0)
+        close(fd);
+    free(wp_fname);
+    free(fname);
+    return rc;
 }
 
 
@@ -927,17 +947,19 @@ sniffer_get_dump(struct rcf_comm_connection *handle, char *cbuf,
     sniffer_t       *snif;
     char            *fname;
     struct flock     lock;
-    int              fd;
-    off_t            offst;
+    int              fd             = -1;
+    off_t            offst          = 0;
     int              fnum;
     size_t           size;
-    char            *wp_fname;
+    char            *wp_fname       = NULL;
     size_t           len            = answer_plen;
     bool first_launch = false;
 
     if ((rc = sniffer_parse_sniff_id(buf, &id)) != 0)
         return rc;
-    if ((snif = sniffer_find_by_id(&id)) == NULL)
+    snif = sniffer_find_by_id(&id);
+    sniffer_id_free_names(&id);
+    if (snif == NULL)
     {
         WARN("Couldn't find the sniffer to get capture logs.");
         return TE_RC(TE_TA_UNIX, TE_EINVAL);
@@ -961,22 +983,29 @@ sniffer_get_dump(struct rcf_comm_connection *handle, char *cbuf,
     if (fd == -1)
     {
         WARN("Couldn't open the capture log file: %s.", fname);
-        return TE_RC(TE_TA_UNIX, TE_EINVAL);
+        free(fname);
+        te_rc = TE_RC(TE_TA_UNIX, TE_EINVAL);
+        goto out;
     }
 
     rc = fcntl(fd, F_SETLKW, &lock);
-    if (rc != 0)
+    if (rc == 0)
+    {
+        offst = lseek(fd, 0, SEEK_END);
+        lock.l_type = F_UNLCK;
+        rc = fcntl(fd, F_SETLK, &lock);
+        if (rc != 0)
+            WARN("Couldn't to unlock the capture log file: %s.", fname);
+    }
+    else
     {
         WARN("Couldn't to lock the capture log file: %s.", fname);
-        return TE_RC(TE_TA_UNIX, TE_EINVAL);
     }
-    offst = lseek(fd, 0, SEEK_END);
-    lock.l_type = F_UNLCK;
-    rc = fcntl(fd, F_SETLK, &lock);
     if (rc != 0)
     {
-        WARN("Couldn't to unlock the capture log file: %s.", fname);
-        return TE_RC(TE_TA_UNIX, TE_EINVAL);
+        free(fname);
+        te_rc = TE_RC(TE_TA_UNIX, TE_EINVAL);
+        goto out;
     }
 
     /* Check for the first log transmission. */
@@ -993,11 +1022,16 @@ sniffer_get_dump(struct rcf_comm_connection *handle, char *cbuf,
         snif->curr_offset = SNIF_PCAP_HSIZE;
         snif->id.abs_offset = strtoll(wp_fname, NULL, 10);
     }
+    else
+    {
+        free(fname);
+    }
+    /* From here on the name is owned by the sniffer */
+    fname = snif->curr_file_name;
 
     size = offst - snif->curr_offset;
     if (size == 0)
     {
-        close(fd);
         snif->state &= ~SNIF_ST_HAS_L;
         if (fnum > 1)
         {
@@ -1014,9 +1048,11 @@ sniffer_get_dump(struct rcf_comm_connection *handle, char *cbuf,
                 te_rc = TE_OS_RC(TE_TA_UNIX, errno);
                 WARN("Failed to remove the capture log file: %s; error=%r",
                      fname, te_rc);
-                return te_rc;
+                goto out;
             }
 
+            close(fd);
+            free(wp_fname);
             return sniffer_get_dump(handle, cbuf, buflen,
                                     answer_plen, buf);
         }
@@ -1030,7 +1066,8 @@ sniffer_get_dump(struct rcf_comm_connection *handle, char *cbuf,
             sniffer_cleanup(snif);
         }
 
-        return TE_RC(TE_TA_UNIX, TE_ENODATA);
+        te_rc = TE_RC(TE_TA_UNIX, TE_ENODATA);
+        goto out;
     }
     if (size > SNIFFER_MAX_LOG_SIZE)
     {
@@ -1041,7 +1078,8 @@ sniffer_get_dump(struct rcf_comm_connection *handle, char *cbuf,
     if (lseek(fd, snif->curr_offset, SEEK_SET) == -1)
     {
         WARN("Couldn't to change offset of the capture log file: %s.", fname);
-        return TE_RC(TE_TA_UNIX, TE_EINVAL);
+        te_rc = TE_RC(TE_TA_UNIX, TE_EINVAL);
+        goto out;
     }
 
     len += snprintf(cbuf + answer_plen, buflen - answer_plen,
@@ -1049,7 +1087,8 @@ sniffer_get_dump(struct rcf_comm_connection *handle, char *cbuf,
     if (len > buflen)
     {
         WARN("Too long rcf message. File is not passed.");
-        return TE_RC(TE_TA_UNIX, TE_EINVAL);
+        te_rc = TE_RC(TE_TA_UNIX, TE_EINVAL);
+        goto out;
     }
 
     errno = 0;
@@ -1070,7 +1109,8 @@ sniffer_get_dump(struct rcf_comm_connection *handle, char *cbuf,
                 RCF_CH_UNLOCK;
                 fprintf(stderr, "Couldn't to lock the capture log file:"
                         "%s. rc %d\n", fname, rc);
-                return TE_RC(TE_TA_UNIX, TE_EINVAL);
+                te_rc = TE_RC(TE_TA_UNIX, TE_EINVAL);
+                goto out;
             }
             res = sendfile(*((int *)handle), fd, 0, size - res);
             lock.l_type = F_UNLCK;
@@ -1080,7 +1120,8 @@ sniffer_get_dump(struct rcf_comm_connection *handle, char *cbuf,
                 RCF_CH_UNLOCK;
                 fprintf(stderr, "Couldn't to unlock the capture log file:"
                         "%s. rc %d\n", fname, rc);
-                return TE_RC(TE_TA_UNIX, TE_EINVAL);
+                te_rc = TE_RC(TE_TA_UNIX, TE_EINVAL);
+                goto out;
             }
         }
     }
@@ -1101,10 +1142,13 @@ sniffer_get_dump(struct rcf_comm_connection *handle, char *cbuf,
     else if ((snif->state & SNIF_ST_DEL) == SNIF_ST_DEL)
         sniffer_cleanup(snif);
 
-    close(fd);
-    if (wp_fname != NULL)
-        free(wp_fname);
-    return 0;
+    te_rc = 0;
+
+out:
+    if (fd >= 0)
+        close(fd);
+    free(wp_fname);
+    return te_rc;
 }
 
 /**
@@ -1181,6 +1225,7 @@ make_argv_str(sniffer_t *sniff, int *s_argc)
         *s_argc += 1;
     }
 
+    free(int_buff);
     return s_argv;
 cleanup_m_argv:
     ERROR("Filed make_argv_str");
@@ -1219,7 +1264,7 @@ sniffer_make_dir(sniffer_t *sniff)
 
     res = snprintf(sniffers_dir, RCF_MAX_PATH, "%s/sniffers",
                    snif_sets.path);
-    if (res > RCF_MAX_PATH)
+    if (res >= RCF_MAX_PATH)
     {
         ERROR("Too long directory name, %d\n", errno);
         return TE_RC(TE_TA_UNIX, TE_EINVAL);
@@ -1236,7 +1281,7 @@ sniffer_make_dir(sniffer_t *sniff)
     res = snprintf(sniff->path, RCF_MAX_PATH, "%s/%s_%s_%s_%u/",
                    sniffers_dir, ta_name, sniff->id.ifname,
                    sniff->id.snifname, sniff->id.ssn);
-    if (res > RCF_MAX_PATH)
+    if (res >= RCF_MAX_PATH)
     {
         WARN("Too long path string for sniffer logs folder.");
         return TE_RC(TE_TA_UNIX, TE_EINVAL);
@@ -1265,6 +1310,7 @@ sniffer_start_process(sniffer_t *sniff)
     char      **s_argv;
     char       *te_snif_path = SNIFFER_EXEC;
     te_errno    rc           = 0;
+    int         i;
 
     rc = sniffer_make_dir(sniff);
     if (rc != 0)
@@ -1277,8 +1323,14 @@ sniffer_start_process(sniffer_t *sniff)
     if ((s_argv == NULL) || (s_argc == 0))
         return TE_RC(TE_TA_UNIX, TE_EINVAL);
 
-    if ((rc = rcf_ch_start_process(&sniff->pid, -1, te_snif_path, true,
-                                   s_argc, (void **)s_argv)) != 0)
+    rc = rcf_ch_start_process(&sniff->pid, -1, te_snif_path, true,
+                              s_argc, (void **)s_argv);
+
+    for (i = 0; i < s_argc; i++)
+        free(s_argv[i]);
+    free(s_argv);
+
+    if (rc != 0)
     {
         ERROR("Start the sniffer process failed.");
         return TE_RC(TE_TA_UNIX, TE_ESHCMD);
@@ -1301,15 +1353,15 @@ sniffer_add_clone(sniffer_t *sniff)
     new_sniff = TE_ALLOC(sizeof(sniffer_t));
     memcpy(new_sniff, sniff, sizeof(sniffer_t));
     if (sniff->curr_file_name != NULL)
-        new_sniff->curr_file_name = strdup(sniff->curr_file_name);
+        new_sniff->curr_file_name = TE_STRDUP(sniff->curr_file_name);
     if (sniff->filter_exp_file != NULL)
-        new_sniff->filter_exp_file = strdup(sniff->filter_exp_file);
+        new_sniff->filter_exp_file = TE_STRDUP(sniff->filter_exp_file);
     if (sniff->filter_exp_str != NULL)
-        new_sniff->filter_exp_str = strdup(sniff->filter_exp_str);
+        new_sniff->filter_exp_str = TE_STRDUP(sniff->filter_exp_str);
     if (sniff->id.snifname != NULL)
-        new_sniff->id.snifname = strdup(sniff->id.snifname);
+        new_sniff->id.snifname = TE_STRDUP(sniff->id.snifname);
     if (sniff->id.ifname != NULL)
-        new_sniff->id.ifname = strdup(sniff->id.ifname);
+        new_sniff->id.ifname = TE_STRDUP(sniff->id.ifname);
 
     new_sniff->state |= SNIF_ST_DEL;
 
@@ -1333,6 +1385,7 @@ sniffer_set_enable(unsigned int gid, const char *oid, const char *value,
 {
     sniffer_t    *sniff;
     int           enable;
+    te_errno      rc;
 
     UNUSED(gid);
 
@@ -1340,7 +1393,7 @@ sniffer_set_enable(unsigned int gid, const char *oid, const char *value,
     if (sniff == NULL)
     {
         ERROR("Couldn't find the sniffer on the oid %s.", oid);
-        return TE_RC(TE_TA_UNIX, TE_EINVAL);
+        return TE_RC(TE_TA_UNIX, TE_ENOENT);
     }
 
     if (value == NULL)
@@ -1360,15 +1413,16 @@ sniffer_set_enable(unsigned int gid, const char *oid, const char *value,
 
     if (enable == 1)
     {
-        if (sniffer_start_process(sniff) == 0)
+        rc = sniffer_start_process(sniff);
+        if (rc != 0)
         {
-            snif_sets.lock = true;
-            sniff->enable = true;
-            sniff->state |= SNIF_ST_START;
-        }
-        else
             WARN("Couldn't start the sniffer process: %s_%s_%d.",
                  ifname, snifname, sniff->id.ssn);
+            return rc;
+        }
+        snif_sets.lock = true;
+        sniff->enable = true;
+        sniff->state |= SNIF_ST_START;
     }
     else if (enable == 0)
     {
@@ -1447,7 +1501,7 @@ sniffer_get(unsigned int gid, const char *oid, char *value,
     if (sniff == NULL)
     {
         ERROR("sniffer_get: Couldn't find the sniffer, oid %s", oid);
-        return TE_RC(TE_TA_UNIX, TE_EINVAL);
+        return TE_RC(TE_TA_UNIX, TE_ENOENT);
     }
 
     if (value == NULL)
@@ -1523,7 +1577,7 @@ sniffer_check_exst_backup(sniffer_t *sniff)
     res = snprintf(sniff->path, RCF_MAX_PATH, "%s/sniffers/%s_%s_%s_%u/",
                    snif_sets.path, ta_name, sniff->id.ifname,
                    sniff->id.snifname, sniff->id.ssn);
-    if (res > RCF_MAX_PATH)
+    if (res >= RCF_MAX_PATH)
     {
         WARN("Too long path string for sniffer logs folder.");
         return false;
@@ -1537,8 +1591,12 @@ sniffer_check_exst_backup(sniffer_t *sniff)
     sniff->curr_file_name = sniffer_get_capture_fname(sniff, &fnum,
                                                       &wp_fname, false);
     if (sniff->curr_file_name == NULL)
+    {
+        free(wp_fname);
         return false;
+    }
     sniff->id.abs_offset = strtoll(wp_fname, NULL, 10);
+    free(wp_fname);
     sniff->curr_offset = SNIF_PCAP_HSIZE;
     sniff->state |= SNIF_ST_START;
 
@@ -1566,17 +1624,20 @@ sniffer_add(unsigned int gid, const char *oid, char *ssn,
     sniffer_t *sniff;
     bool backup = false;
 
+    if (sniffer_find(ifname, snifname) != NULL)
+        return TE_RC(TE_TA_UNIX, TE_EEXIST);
+
     sniff = TE_ALLOC(sizeof(sniffer_t));
-    sniff->id.snifname      = strdup(snifname);
-    sniff->id.ifname        = strdup(ifname);
+    sniff->id.snifname      = TE_STRDUP(snifname);
+    sniff->id.ifname        = TE_STRDUP(ifname);
     sniff->id.ssn           = atoi(ssn);
 
     sniff->id.abs_offset    = 0;
     sniff->enable           = 0;
     sniff->snaplen          = snif_sets.snaplen;
     sniff->pid              = 0;
-    sniff->filter_exp_file  = strdup(snif_sets.filter_exp_file);
-    sniff->filter_exp_str   = strdup(snif_sets.filter_exp_str);
+    sniff->filter_exp_file  = TE_STRDUP(snif_sets.filter_exp_file);
+    sniff->filter_exp_str   = TE_STRDUP(snif_sets.filter_exp_str);
     sniff->overfill_meth    = snif_sets.overfill_meth;
     sniff->file_size        = snif_sets.file_size;
     sniff->rotation         = snif_sets.rotation;
@@ -1619,6 +1680,12 @@ sniffer_add(unsigned int gid, const char *oid, char *ssn,
     if (sniffer_get_ssn_ff(snif_sets.ssn_fname) != 0)
     {
         ERROR("Couldn't get SSN from the file %s", snif_sets.ssn_fname);
+        free(sniff->id.snifname);
+        free(sniff->id.ifname);
+        free(sniff->filter_exp_file);
+        free(sniff->filter_exp_str);
+        free(sniff->curr_file_name);
+        free(sniff);
         return TE_RC(TE_TA_UNIX, TE_EINVAL);
     }
     sniff->id.ssn = snif_sets.ssn;
@@ -1652,7 +1719,7 @@ sniffer_del(unsigned int gid, const char *oid, const char *ifname,
     if (sniff == NULL)
     {
         ERROR("sniffer_del: Couldn't find the sniffer, oid %s", oid);
-        return TE_RC(TE_TA_UNIX, TE_EINVAL);
+        return TE_RC(TE_TA_UNIX, TE_ENOENT);
     }
 
     if (sniff->enable == 1)
@@ -1819,7 +1886,6 @@ rcf_ch_get_sniffers(struct rcf_comm_connection *handle, char *cbuf,
         {
             ERROR("Too long sniffer id: %s", sniff_id_str);
             alen = 0;
-            free(abuf);
         }
     }
 
@@ -1879,7 +1945,7 @@ ta_unix_conf_sniffer_cleanup(void)
     }
 
     if (snprintf(sniffers_dir, RCF_MAX_PATH, "%s/sniffers",
-                 snif_sets.path) > RCF_MAX_PATH)
+                 snif_sets.path) >= RCF_MAX_PATH)
     {
         ERROR("Too long directory name, %d\n", errno);
         return TE_RC(TE_TA_UNIX, TE_EINVAL);

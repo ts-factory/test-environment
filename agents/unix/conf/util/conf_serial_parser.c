@@ -178,6 +178,7 @@ parser_stop_thread(serial_parser_t *parser)
         /* Stop the thread */
         pthread_cancel(parser->thread);
         TE_SERIAL_CHECK_LOCK(pthread_mutex_unlock(&parser->mutex));
+        pthread_join(parser->thread, NULL);
         parser->enable = false;
     }
     return 0;
@@ -204,7 +205,12 @@ parser_add(unsigned int gid, const char *oid, char *cname,
     serial_parser_t *parser;
     int              rc;
 
-    parser = TE_ALLOC_UNINITIALIZED(sizeof(serial_parser_t));
+    if (strlen(pname) > TE_SERIAL_MAX_NAME)
+        return TE_RC(TE_TA_UNIX, TE_ENAMETOOLONG);
+    if (parser_get_by_name(pname) != NULL)
+        return TE_RC(TE_TA_UNIX, TE_EEXIST);
+
+    parser = TE_ALLOC(sizeof(serial_parser_t));
     parser->enable      = false;
     parser->rcf         = false;
     parser->port        = TE_SERIAL_PORT;
@@ -398,7 +404,7 @@ parser_set_enable(unsigned int gid, const char *oid, char *value,
         {
             ERROR("Couldn't to start the parser thread %s, oid %s",
                   pname, oid);
-            return TE_RC(TE_TA_UNIX, TE_EINVAL);
+            return TE_OS_RC(TE_TA_UNIX, rc);
         }
     }
     else
@@ -407,6 +413,7 @@ parser_set_enable(unsigned int gid, const char *oid, char *value,
         TE_SERIAL_CHECK_LOCK(pthread_mutex_lock(&parser->mutex));
         rc = pthread_cancel(parser->thread);
         TE_SERIAL_CHECK_LOCK(pthread_mutex_unlock(&parser->mutex));
+        pthread_join(parser->thread, NULL);
     }
 
     parser->enable = en;
@@ -557,7 +564,6 @@ parser_reset(unsigned int gid, const char *oid, char *value,
 
     serial_parser_t  *parser;
     serial_event_t   *event;
-    serial_pattern_t *pat;
 
     if (atoi(value) == false)
         return 0;
@@ -568,12 +574,7 @@ parser_reset(unsigned int gid, const char *oid, char *value,
 
     TE_SERIAL_CHECK_LOCK(pthread_mutex_lock(&parser->mutex));
     SLIST_FOREACH(event, &parser->events, ent_ev_l)
-    {
-        SLIST_FOREACH(pat, &event->patterns, ent_pat_l)
-        {
-            event->status = false;
-        }
-    }
+        event->status = false;
     TE_SERIAL_CHECK_LOCK(pthread_mutex_unlock(&parser->mutex));
 
     return 0;
@@ -652,6 +653,10 @@ parser_event_add(unsigned int gid, const char *oid, char *t_name,
     parser = parser_get_by_name(pname);
     if (parser == NULL)
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
+    if (strlen(ename) > TE_SERIAL_MAX_NAME)
+        return TE_RC(TE_TA_UNIX, TE_ENAMETOOLONG);
+    if (parser_get_event_by_name(parser, ename) != NULL)
+        return TE_RC(TE_TA_UNIX, TE_EEXIST);
 
     event = TE_ALLOC_UNINITIALIZED(sizeof(serial_event_t));
 
@@ -854,6 +859,10 @@ parser_pattern_add(unsigned int gid, const char *oid, const char *pattern,
     event = parser_get_event_by_name(parser, ename);
     if (event == NULL)
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
+    if (strlen(name) > TE_SERIAL_MAX_NAME)
+        return TE_RC(TE_TA_UNIX, TE_ENAMETOOLONG);
+    if (parser_get_pattern_by_name(event, name) != NULL)
+        return TE_RC(TE_TA_UNIX, TE_EEXIST);
 
     pat = TE_ALLOC_UNINITIALIZED(sizeof(serial_pattern_t));
 

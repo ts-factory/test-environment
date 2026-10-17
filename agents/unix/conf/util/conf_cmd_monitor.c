@@ -76,7 +76,7 @@ cmd_monitor_add(unsigned int gid, const char *oid, char *value, char *name)
         ERROR("Cannot add another command monitor with "
               "the same name '%s'",
               name);
-        return TE_RC(TE_TA_UNIX, TE_EINVAL);
+        return TE_RC(TE_TA_UNIX, TE_EEXIST);
     }
     monitor = TE_ALLOC(sizeof(*monitor));
 
@@ -320,7 +320,7 @@ monitor_common_set(unsigned int gid, const char *oid, char *value,
     if (monitor->enable)
     {
        ERROR("Cannot change monitor properties while it is enabled");
-       return TE_RC(TE_TA_UNIX, TE_EINVAL);
+       return TE_RC(TE_TA_UNIX, TE_EBUSY);
     }
 
     if (strstr(oid, "/command:") != NULL)

@@ -96,6 +96,8 @@ typedef struct bpf_map_entry {
     unsigned int max_entries;
     bool writable;
     unsigned int n_values;
+    unsigned int kern_value_size; /**< Size of the value buffer the kernel
+                                       copies on lookup and update */
 } bpf_map_entry;
 
 /** Structure describing perf event data entry. */
@@ -177,6 +179,10 @@ typedef struct bpf_entry {
 static enum bpf_perf_event_ret
 bpf_xdp_perf_event_handler(void *ctx, int cpu, void *data, uint32_t size);
 
+/** Declaration of perf events enabling/disabling function */
+static te_errno
+bpf_xdp_perf_map_enable(bpf_perf_map_entry *map, bool enable);
+
 /**< Head of the BPF objects list */
 static LIST_HEAD(, bpf_entry) bpf_list_h = LIST_HEAD_INITIALIZER(bpf_list_h);
 
@@ -225,6 +231,26 @@ bpf_num_possible_cpu(unsigned int *n_values)
     *n_values = possible_cpus;
 
     fclose(fp);
+
+    return 0;
+}
+
+/**
+ * Check that the hex string representation of a binary value
+ * (see te_str_hex_raw2str()) fits into a configuration value.
+ *
+ * @param len           Length of the binary value.
+ *
+ * @return Status code.
+ */
+static te_errno
+bpf_check_hex_len(size_t len)
+{
+    if (len * 3 > RCF_MAX_VAL)
+    {
+        ERROR("Hex string of %zu bytes does not fit into a value", len);
+        return TE_RC(TE_TA_UNIX, TE_E2BIG);
+    }
 
     return 0;
 }
@@ -367,6 +393,29 @@ bpf_init_map_info(struct bpf_map *map, struct bpf_map_entry *map_info)
     {
         map_info->n_values = 1;
     }
+
+    /*
+     * For per-CPU maps the kernel copies a value for each possible CPU,
+     * each one padded to 8 bytes, on lookup and update.
+     */
+    if (map_info->type == BPF_MAP_TYPE_PERCPU_ARRAY ||
+        map_info->type == BPF_MAP_TYPE_PERCPU_HASH ||
+        map_info->type == BPF_MAP_TYPE_LRU_PERCPU_HASH)
+    {
+        unsigned int n_cpus;
+
+        rc = bpf_num_possible_cpu(&n_cpus);
+        if (rc != 0)
+            return rc;
+
+        map_info->kern_value_size = TE_ALIGN(map_info->value_size, 8) *
+                                    n_cpus;
+    }
+    else
+    {
+        map_info->kern_value_size = map_info->value_size;
+    }
+
     map_info->writable = false;
 
     return 0;
@@ -471,7 +520,8 @@ bpf_load(struct bpf_entry *bpf)
     {
         err = te_rc_os2te(errno);
         ERROR("BPF object file cannot be loaded, error=%r", err);
-        return TE_RC(TE_TA_UNIX, err);
+        rc = TE_RC(TE_TA_UNIX, err);
+        goto fail;
     }
 #endif
 
@@ -480,12 +530,13 @@ bpf_load(struct bpf_entry *bpf)
         if (prog_number == BPF_MAX_ENTRIES)
         {
             ERROR("Number of BPF programs in object file is too big.");
-            return TE_RC(TE_TA_UNIX, TE_EFBIG);
+            rc = TE_RC(TE_TA_UNIX, TE_EFBIG);
+            goto fail;
         }
 
         rc = bpf_init_prog_info(prog, &bpf->progs[prog_number]);
         if (rc != 0)
-            return rc;
+            goto fail;
 
         prog_number++;
     }
@@ -498,7 +549,8 @@ bpf_load(struct bpf_entry *bpf)
             perf_map_number == BPF_MAX_ENTRIES)
         {
             ERROR("Number of BPF maps in object file is too big.");
-            return TE_RC(TE_TA_UNIX, TE_EFBIG);
+            rc = TE_RC(TE_TA_UNIX, TE_EFBIG);
+            goto fail;
         }
 
 #if LIBBPF_MAJOR_VERSION == 0
@@ -519,7 +571,7 @@ bpf_load(struct bpf_entry *bpf)
         }
 
         if (rc != 0)
-            return rc;
+            goto fail;
     }
 
     bpf->prog_number = prog_number;
@@ -527,6 +579,11 @@ bpf_load(struct bpf_entry *bpf)
     bpf->perf_map_number = perf_map_number;
     bpf->state = BPF_STATE_LOADED;
     return 0;
+
+fail:
+    bpf_object__close(bpf->obj);
+    bpf->obj = NULL;
+    return rc;
 }
 
 /**
@@ -537,13 +594,19 @@ bpf_load(struct bpf_entry *bpf)
 static void
 bpf_unload(struct bpf_entry *bpf)
 {
+    unsigned int i;
+
     if (bpf->state == BPF_STATE_UNLOADED)
         return;
+
+    for (i = 0; i < bpf->perf_map_number; i++)
+        bpf_xdp_perf_map_enable(&bpf->perf_maps[i], false);
 
     bpf_object__close(bpf->obj);
 
     bpf->prog_number = 0;
     bpf->map_number = 0;
+    bpf->perf_map_number = 0;
     bpf->state = BPF_STATE_UNLOADED;
     return;
 }
@@ -1007,6 +1070,17 @@ static const char* bpf_map_types_str[] = {
     [BPF_MAP_TYPE_REUSEPORT_SOCKARRAY] = "REUSEPORT_SOCKARRAY",
 };
 
+/** Convert BPF map type to string */
+static const char *
+bpf_map_type2str(enum bpf_map_type type)
+{
+    if ((unsigned int)type >= TE_ARRAY_LEN(bpf_map_types_str) ||
+        bpf_map_types_str[type] == NULL)
+        return "<UNKNOWN>";
+
+    return bpf_map_types_str[type];
+}
+
 /**
  * Common get function for the BPF map parameters.
  *
@@ -1034,7 +1108,7 @@ bpf_get_map_params(unsigned int gid, const char *oid, char *value,
     }
 
     if (strstr(oid, "/type:") != NULL)
-        snprintf(value, RCF_MAX_VAL, "%s", bpf_map_types_str[map->type]);
+        snprintf(value, RCF_MAX_VAL, "%s", bpf_map_type2str(map->type));
     else if ((strstr(oid, "/key_size:") != NULL))
         snprintf(value, RCF_MAX_VAL, "%u", map->key_size);
     else if ((strstr(oid, "/value_size:") != NULL))
@@ -1081,8 +1155,12 @@ bpf_get_map_kv_pair(unsigned int gid, const char *oid, char *value_str,
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
     }
 
+    rc = bpf_check_hex_len(map->value_size * map->n_values);
+    if (rc != 0)
+        return rc;
+
     key = TE_ALLOC(map->key_size);
-    value = TE_ALLOC(map->value_size * map->n_values);
+    value = TE_ALLOC(map->kern_value_size);
 
     rc = te_str_hex_str2raw(key_str, key, map->key_size);
     if (rc != 0)
@@ -1150,6 +1228,10 @@ bpf_list_map_kv_pair(unsigned int gid, const char *oid, const char *sub_id,
         *list = result.ptr;
         return 0;
     }
+
+    rc = bpf_check_hex_len(map->key_size);
+    if (rc != 0)
+        return rc;
 
     key = TE_ALLOC(map->key_size);
     prev_key = TE_ALLOC(map->key_size);
@@ -1455,7 +1537,7 @@ bpf_update_map_writable_kv_pair(unsigned int gid, const char *oid,
     if (rc != 0)
         goto fail_free_key;
 
-    value = TE_ALLOC(map->value_size * map->n_values);
+    value = TE_ALLOC(map->kern_value_size);
 
     rc = te_str_hex_str2raw(value_str, value, map->value_size * map->n_values);
     if (rc != 0)
@@ -1986,6 +2068,16 @@ bpf_get_perf_map_event(unsigned int gid, const char *oid, char *value_str,
         return rc;
     }
 
+    if (id >= te_vec_size(&map->events))
+    {
+        ERROR("%s(): Event %u isn't found.", __FUNCTION__, id);
+        return TE_RC(TE_TA_UNIX, TE_ENOENT);
+    }
+
+    rc = bpf_check_hex_len(map->event_size);
+    if (rc != 0)
+        return rc;
+
     event = TE_VEC_GET(bpf_perf_map_event, &map->events, id);
     rc = te_str_hex_raw2str(event.data, map->event_size, &value_buf);
 
@@ -2345,8 +2437,10 @@ bpf_set_if_xdp(unsigned int gid, const char *oid, const char *value,
     }
     else
     {
-        rc = bpf_add_and_link_xdp(cfg_convert_oid_str(value), ifindex,
-                                  xdp_flags);
+        cfg_oid *prog_oid = cfg_convert_oid_str(value);
+
+        rc = bpf_add_and_link_xdp(prog_oid, ifindex, xdp_flags);
+        cfg_free_oid(prog_oid);
         if (rc != 0)
             return rc;
     }
@@ -2418,17 +2512,24 @@ int conf_bpf_fd_by_prog_oid(const char *prog_oid_str)
     const char *prog_name = NULL;
     cfg_oid *prog_oid = NULL;
     struct bpf_prog_entry *prog;
+    int fd = -1;
 
     prog_oid = cfg_convert_oid_str(prog_oid_str);
     if (prog_oid == NULL)
         return -1;
 
-    bpf_id_str = CFG_OID_GET_INST_NAME(prog_oid, BPF_PROG_OID_LEVEL_OBJ_ID);
-    prog_name = CFG_OID_GET_INST_NAME(prog_oid, BPF_PROG_OID_LEVEL_NAME);
+    if (prog_oid->inst && prog_oid->len == BPF_PROG_OID_LEVELS)
+    {
+        bpf_id_str = CFG_OID_GET_INST_NAME(prog_oid,
+                                           BPF_PROG_OID_LEVEL_OBJ_ID);
+        prog_name = CFG_OID_GET_INST_NAME(prog_oid, BPF_PROG_OID_LEVEL_NAME);
 
-    prog = bpf_find_prog(bpf_id_str, prog_name);
-    if (prog == NULL)
-        return -1;
+        prog = bpf_find_prog(bpf_id_str, prog_name);
+        if (prog != NULL)
+            fd = prog->fd;
+    }
 
-    return prog->fd;
+    cfg_free_oid(prog_oid);
+
+    return fd;
 }
