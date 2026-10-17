@@ -61,6 +61,7 @@
 #include "rcf_ch_api.h"
 #include "rcf_pch.h"
 #include "rcf_pch_ta_cfg.h"
+#include "rcf_pch_tree.h"
 #include "unix_internal.h"
 #include "conf_bpf.h"
 
@@ -96,6 +97,8 @@ typedef struct bpf_map_entry {
     unsigned int max_entries;
     bool writable;
     unsigned int n_values;
+    unsigned int kern_value_size; /**< Size of the value buffer the kernel
+                                       copies on lookup and update */
 } bpf_map_entry;
 
 /** Structure describing perf event data entry. */
@@ -177,6 +180,10 @@ typedef struct bpf_entry {
 static enum bpf_perf_event_ret
 bpf_xdp_perf_event_handler(void *ctx, int cpu, void *data, uint32_t size);
 
+/** Declaration of perf events enabling/disabling function */
+static te_errno
+bpf_xdp_perf_map_enable(bpf_perf_map_entry *map, bool enable);
+
 /**< Head of the BPF objects list */
 static LIST_HEAD(, bpf_entry) bpf_list_h = LIST_HEAD_INITIALIZER(bpf_list_h);
 
@@ -225,6 +232,26 @@ bpf_num_possible_cpu(unsigned int *n_values)
     *n_values = possible_cpus;
 
     fclose(fp);
+
+    return 0;
+}
+
+/**
+ * Check that the hex string representation of a binary value
+ * (see te_str_hex_raw2str()) fits into a configuration value.
+ *
+ * @param len           Length of the binary value.
+ *
+ * @return Status code.
+ */
+static te_errno
+bpf_check_hex_len(size_t len)
+{
+    if (len * 3 > RCF_MAX_VAL)
+    {
+        ERROR("Hex string of %zu bytes does not fit into a value", len);
+        return TE_RC(TE_TA_UNIX, TE_E2BIG);
+    }
 
     return 0;
 }
@@ -367,6 +394,29 @@ bpf_init_map_info(struct bpf_map *map, struct bpf_map_entry *map_info)
     {
         map_info->n_values = 1;
     }
+
+    /*
+     * For per-CPU maps the kernel copies a value for each possible CPU,
+     * each one padded to 8 bytes, on lookup and update.
+     */
+    if (map_info->type == BPF_MAP_TYPE_PERCPU_ARRAY ||
+        map_info->type == BPF_MAP_TYPE_PERCPU_HASH ||
+        map_info->type == BPF_MAP_TYPE_LRU_PERCPU_HASH)
+    {
+        unsigned int n_cpus;
+
+        rc = bpf_num_possible_cpu(&n_cpus);
+        if (rc != 0)
+            return rc;
+
+        map_info->kern_value_size = TE_ALIGN(map_info->value_size, 8) *
+                                    n_cpus;
+    }
+    else
+    {
+        map_info->kern_value_size = map_info->value_size;
+    }
+
     map_info->writable = false;
 
     return 0;
@@ -471,7 +521,8 @@ bpf_load(struct bpf_entry *bpf)
     {
         err = te_rc_os2te(errno);
         ERROR("BPF object file cannot be loaded, error=%r", err);
-        return TE_RC(TE_TA_UNIX, err);
+        rc = TE_RC(TE_TA_UNIX, err);
+        goto fail;
     }
 #endif
 
@@ -480,12 +531,13 @@ bpf_load(struct bpf_entry *bpf)
         if (prog_number == BPF_MAX_ENTRIES)
         {
             ERROR("Number of BPF programs in object file is too big.");
-            return TE_RC(TE_TA_UNIX, TE_EFBIG);
+            rc = TE_RC(TE_TA_UNIX, TE_EFBIG);
+            goto fail;
         }
 
         rc = bpf_init_prog_info(prog, &bpf->progs[prog_number]);
         if (rc != 0)
-            return rc;
+            goto fail;
 
         prog_number++;
     }
@@ -498,7 +550,8 @@ bpf_load(struct bpf_entry *bpf)
             perf_map_number == BPF_MAX_ENTRIES)
         {
             ERROR("Number of BPF maps in object file is too big.");
-            return TE_RC(TE_TA_UNIX, TE_EFBIG);
+            rc = TE_RC(TE_TA_UNIX, TE_EFBIG);
+            goto fail;
         }
 
 #if LIBBPF_MAJOR_VERSION == 0
@@ -519,7 +572,7 @@ bpf_load(struct bpf_entry *bpf)
         }
 
         if (rc != 0)
-            return rc;
+            goto fail;
     }
 
     bpf->prog_number = prog_number;
@@ -527,6 +580,11 @@ bpf_load(struct bpf_entry *bpf)
     bpf->perf_map_number = perf_map_number;
     bpf->state = BPF_STATE_LOADED;
     return 0;
+
+fail:
+    bpf_object__close(bpf->obj);
+    bpf->obj = NULL;
+    return rc;
 }
 
 /**
@@ -537,13 +595,19 @@ bpf_load(struct bpf_entry *bpf)
 static void
 bpf_unload(struct bpf_entry *bpf)
 {
+    unsigned int i;
+
     if (bpf->state == BPF_STATE_UNLOADED)
         return;
+
+    for (i = 0; i < bpf->perf_map_number; i++)
+        bpf_xdp_perf_map_enable(&bpf->perf_maps[i], false);
 
     bpf_object__close(bpf->obj);
 
     bpf->prog_number = 0;
     bpf->map_number = 0;
+    bpf->perf_map_number = 0;
     bpf->state = BPF_STATE_UNLOADED;
     return;
 }
@@ -551,23 +615,16 @@ bpf_unload(struct bpf_entry *bpf)
 /**
  * Add a new BPF object.
  *
- * @param gid       Request's group identifier (unused).
- * @param oid       Full object instance identifier (unused).
- * @param value     New value (unused).
- * @param bpf_id    BPF object id.
+ * @param ctx       Request context.
  *
  * @return Status code.
  */
 static te_errno
-bpf_add(unsigned int gid, const char *oid, const char *value,
-        const char *bpf_id)
+bpf_add(const ta_conf_ctx *ctx)
 {
+    const char *bpf_id = ta_conf_ctx_inst(ctx, "bpf");
     struct bpf_entry *bpf;
     te_errno rc = 0;
-
-    UNUSED(gid);
-    UNUSED(oid);
-    UNUSED(value);
 
     if (bpf_find(bpf_id) != NULL)
         return TE_RC(TE_TA_UNIX, TE_EEXIST);
@@ -584,21 +641,16 @@ bpf_add(unsigned int gid, const char *oid, const char *value,
 /**
  * Delete the BPF object.
  *
- * @param gid       Request's group identifier (unused).
- * @param oid       Full object instance identifier (unused).
- * @param bpf_id    BPF object id.
+ * @param ctx       Request context.
  *
  * @return Status code.
  */
 static te_errno
-bpf_del(unsigned int gid, const char *oid, const char *bpf_id)
+bpf_del(const ta_conf_ctx *ctx)
 {
     struct bpf_entry *bpf;
 
-    UNUSED(gid);
-    UNUSED(oid);
-
-    bpf = bpf_find(bpf_id);
+    bpf = bpf_find(ta_conf_ctx_inst(ctx, "bpf"));
     if (bpf == NULL)
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
 
@@ -613,67 +665,49 @@ bpf_del(unsigned int gid, const char *oid, const char *bpf_id)
 /**
  * Get instance list of the BPF objects for object "/agent/bpf".
  *
- * @param gid       Request's group identifier (unused).
- * @param oid       Full parent object instance identifier (unused).
- * @param sub_id    ID of the object to be listed (unused).
- * @param list      Location for the list pointer.
+ * @param ctx       Request context.
+ * @param names     Vector to append instance names to.
  *
  * @return Status code.
  */
 static te_errno
-bpf_list(unsigned int gid, const char *oid, const char *sub_id,
-         char **list)
+bpf_list(const ta_conf_ctx *ctx, te_vec *names)
 {
-    te_string result = TE_STRING_INIT;
-    bool first = true;
     bpf_entry *bpf;
 
-    UNUSED(gid);
-    UNUSED(oid);
-    UNUSED(sub_id);
+    UNUSED(ctx);
 
     LIST_FOREACH(bpf, &bpf_list_h, next)
     {
-        te_string_append(&result, "%s%u", first ? "" : " ", bpf->id);
-        first = false;
+        char *name = te_string_fmt("%u", bpf->id);
+
+        TE_VEC_APPEND(names, name);
     }
 
-    *list = result.ptr;
     return 0;
 }
 
 /**
  * Get list of loaded programs or maps from BPF object.
  *
- * @param gid       Group identifier (unused).
- * @param oid       Full identifier of the father instance (unused).
+ * @param ctx       Request context.
+ * @param names     Vector to append instance names to.
  * @param sub_id    ID of the object to be listed.
- * @param list      Location for the list pointer.
- * @param bpf_id    BPF object id.
  *
  * @return      Status code
  */
 static te_errno
-bpf_prog_map_list(unsigned int gid, const char *oid, const char *sub_id,
-                  char **list,  const char *bpf_id)
+bpf_prog_map_list(const ta_conf_ctx *ctx, te_vec *names, const char *sub_id)
 {
-    te_string result = TE_STRING_INIT;
-    bool first = true;
     bool is_map = false;
     bool is_perf_map = false;
     bpf_entry *bpf;
     unsigned int i;
     unsigned int entries_nb = 0;
 
-    UNUSED(gid);
-    UNUSED(oid);
-
-    bpf = bpf_find(bpf_id);
+    bpf = bpf_find(ta_conf_ctx_inst(ctx, "bpf"));
     if (bpf == NULL)
-    {
-        te_string_free(&result);
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
-    }
 
     if (strcmp(sub_id, "program") == 0)
     {
@@ -692,21 +726,40 @@ bpf_prog_map_list(unsigned int gid, const char *oid, const char *sub_id,
 
     for (i = 0; i < entries_nb; i++)
     {
-        const char *name;
+        char *name;
 
         if (is_perf_map)
-            name = bpf->perf_maps[i].name;
+            name = TE_STRDUP(bpf->perf_maps[i].name);
         else if (is_map)
-            name = bpf->maps[i].name;
+            name = TE_STRDUP(bpf->maps[i].name);
         else
-            name = bpf->progs[i].name;
+            name = TE_STRDUP(bpf->progs[i].name);
 
-        te_string_append(&result, "%s%s", first ? "" : " ", name);
-        first = false;
+        TE_VEC_APPEND(names, name);
     }
 
-    *list = result.ptr;
     return 0;
+}
+
+/** List handler of /agent/bpf/program */
+static te_errno
+bpf_prog_list(const ta_conf_ctx *ctx, te_vec *names)
+{
+    return bpf_prog_map_list(ctx, names, "program");
+}
+
+/** List handler of /agent/bpf/perf_map */
+static te_errno
+bpf_perf_map_list(const ta_conf_ctx *ctx, te_vec *names)
+{
+    return bpf_prog_map_list(ctx, names, "perf_map");
+}
+
+/** List handler of /agent/bpf/map */
+static te_errno
+bpf_map_list(const ta_conf_ctx *ctx, te_vec *names)
+{
+    return bpf_prog_map_list(ctx, names, "map");
 }
 
 /* String representations of BPF program types */
@@ -780,31 +833,27 @@ bpf_state_str2val(const char *state_str, unsigned int *state_val)
 /**
  * Common get function for the BPF object parameters.
  *
- * @param gid           Group identifier (unused).
- * @param oid           Full object instance identifier.
- * @param[out] value    Obtained value.
- * @param bpf_id        BPF object id.
+ * @param ctx           Request context.
+ * @param[out] val      Obtained value.
  *
  * @return Status code.
  */
 static te_errno
-bpf_get_params(unsigned int gid, const char *oid, char *value,
-               const char *bpf_id)
+bpf_get_params(const ta_conf_ctx *ctx, te_string *val)
 {
+    const char *oid = ta_conf_ctx_oid(ctx);
     struct bpf_entry *bpf;
 
-    UNUSED(gid);
-
-    bpf = bpf_find(bpf_id);
+    bpf = bpf_find(ta_conf_ctx_inst(ctx, "bpf"));
     if (bpf == NULL)
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
 
     if (strstr(oid, "/filepath:") != NULL)
-        snprintf(value, RCF_MAX_VAL, "%s", bpf->filepath);
+        te_string_append(val, "%s", bpf->filepath);
     else if ((strstr(oid, "/type:") != NULL))
-        snprintf(value, RCF_MAX_VAL, "%s", bpf_prog_types_str[bpf->prog_type]);
+        te_string_append(val, "%s", bpf_prog_types_str[bpf->prog_type]);
     else if ((strstr(oid, "/state:") != NULL))
-        snprintf(value, RCF_MAX_VAL, "%s", bpf_states_str[bpf->state]);
+        te_string_append(val, "%s", bpf_states_str[bpf->state]);
 
     return 0;
 }
@@ -812,23 +861,17 @@ bpf_get_params(unsigned int gid, const char *oid, char *value,
 /**
  * Set function for the BPF object filepath.
  *
- * @param gid       Group identifier (unused).
- * @param oid       Full object instance identifier.
+ * @param ctx       Request context.
  * @param value     New value.
- * @param bpf_id    BPF object id.
  *
  * @return Status code.
  */
 static te_errno
-bpf_set_filepath(unsigned int gid, const char *oid, const char *value,
-                 const char *bpf_id)
+bpf_set_filepath(const ta_conf_ctx *ctx, const char *value)
 {
     struct bpf_entry *bpf;
 
-    UNUSED(gid);
-    UNUSED(oid);
-
-    bpf = bpf_find(bpf_id);
+    bpf = bpf_find(ta_conf_ctx_inst(ctx, "bpf"));
     if (bpf == NULL)
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
 
@@ -851,24 +894,18 @@ bpf_set_filepath(unsigned int gid, const char *oid, const char *value,
 /**
  * Set function for the BPF object type.
  *
- * @param gid       Group identifier (unused).
- * @param oid       Full object instance identifier.
+ * @param ctx       Request context.
  * @param value     New value.
- * @param bpf_id    BPF object id.
  *
  * @return Status code.
  */
 static te_errno
-bpf_set_type(unsigned int gid, const char *oid, const char *value,
-             const char *bpf_id)
+bpf_set_type(const ta_conf_ctx *ctx, const char *value)
 {
     struct bpf_entry *bpf;
     te_errno rc = 0;
 
-    UNUSED(gid);
-    UNUSED(oid);
-
-    bpf = bpf_find(bpf_id);
+    bpf = bpf_find(ta_conf_ctx_inst(ctx, "bpf"));
     if (bpf == NULL)
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
 
@@ -888,25 +925,19 @@ bpf_set_type(unsigned int gid, const char *oid, const char *value,
 /**
  * Set function for the BPF object state.
  *
- * @param gid       Group identifier (unused).
- * @param oid       Full object instance identifier.
+ * @param ctx       Request context.
  * @param value     New value.
- * @param bpf_id    BPF object id.
  *
  * @return Status code.
  */
 static te_errno
-bpf_set_state(unsigned int gid, const char *oid, const char *value,
-              const char *bpf_id)
+bpf_set_state(const ta_conf_ctx *ctx, const char *value)
 {
     struct bpf_entry *bpf;
     te_errno rc = 0;
     enum bpf_object_state state_to;
 
-    UNUSED(gid);
-    UNUSED(oid);
-
-    bpf = bpf_find(bpf_id);
+    bpf = bpf_find(ta_conf_ctx_inst(ctx, "bpf"));
     if (bpf == NULL)
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
 
@@ -982,6 +1013,34 @@ bpf_find_perf_map(const char *bpf_id, const char *map_name)
     return NULL;
 }
 
+/**
+ * Find the BPF map a request is addressed to.
+ *
+ * @param ctx           Request context.
+ *
+ * @return The BPF map unit or NULL.
+ */
+static bpf_map_entry *
+bpf_find_map_by_ctx(const ta_conf_ctx *ctx)
+{
+    return bpf_find_map(ta_conf_ctx_inst(ctx, "bpf"),
+                        ta_conf_ctx_inst(ctx, "map"));
+}
+
+/**
+ * Find the BPF perf map a request is addressed to.
+ *
+ * @param ctx           Request context.
+ *
+ * @return The BPF map unit or NULL.
+ */
+static bpf_perf_map_entry *
+bpf_find_perf_map_by_ctx(const ta_conf_ctx *ctx)
+{
+    return bpf_find_perf_map(ta_conf_ctx_inst(ctx, "bpf"),
+                             ta_conf_ctx_inst(ctx, "perf_map"));
+}
+
 /* String representations of BPF map types */
 static const char* bpf_map_types_str[] = {
     [BPF_MAP_TYPE_UNSPEC] =              "UNSPEC",
@@ -1007,42 +1066,72 @@ static const char* bpf_map_types_str[] = {
     [BPF_MAP_TYPE_REUSEPORT_SOCKARRAY] = "REUSEPORT_SOCKARRAY",
 };
 
+/** Convert BPF map type to string */
+static const char *
+bpf_map_type2str(enum bpf_map_type type)
+{
+    if ((unsigned int)type >= TE_ARRAY_LEN(bpf_map_types_str) ||
+        bpf_map_types_str[type] == NULL)
+        return "<UNKNOWN>";
+
+    return bpf_map_types_str[type];
+}
+
 /**
- * Common get function for the BPF map parameters.
+ * Get the type of a BPF map.
  *
- * @param gid           Group identifier (unused).
- * @param oid           Full object instance identifier.
- * @param[out] value    Obtained value.
- * @param bpf_id        BPF object id.
- * @param map_name      Map name.
+ * @param ctx           Request context.
+ * @param[out] val      Obtained value.
  *
  * @return Status code.
  */
 static te_errno
-bpf_get_map_params(unsigned int gid, const char *oid, char *value,
-                   const char *bpf_id, const char *map_name)
+bpf_get_map_type(const ta_conf_ctx *ctx, te_string *val)
 {
     struct bpf_map_entry *map;
 
-    UNUSED(gid);
-
-    map = bpf_find_map(bpf_id, map_name);
+    map = bpf_find_map_by_ctx(ctx);
     if (map == NULL)
     {
-        ERROR("Map %s isn't found.", map_name);
+        ERROR("Map %s isn't found.", ta_conf_ctx_inst(ctx, "map"));
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
     }
 
-    if (strstr(oid, "/type:") != NULL)
-        snprintf(value, RCF_MAX_VAL, "%s", bpf_map_types_str[map->type]);
-    else if ((strstr(oid, "/key_size:") != NULL))
-        snprintf(value, RCF_MAX_VAL, "%u", map->key_size);
+    te_string_append(val, "%s", bpf_map_type2str(map->type));
+
+    return 0;
+}
+
+/**
+ * Common get function for the integer BPF map parameters.
+ *
+ * @param ctx           Request context.
+ * @param[out] val      Obtained value.
+ *
+ * @return Status code.
+ */
+static te_errno
+bpf_get_map_params_int(const ta_conf_ctx *ctx, int32_t *val)
+{
+    const char *oid = ta_conf_ctx_oid(ctx);
+    struct bpf_map_entry *map;
+
+    map = bpf_find_map_by_ctx(ctx);
+    if (map == NULL)
+    {
+        ERROR("Map %s isn't found.", ta_conf_ctx_inst(ctx, "map"));
+        return TE_RC(TE_TA_UNIX, TE_ENOENT);
+    }
+
+    if ((strstr(oid, "/key_size:") != NULL))
+        *val = (int32_t)map->key_size;
     else if ((strstr(oid, "/value_size:") != NULL))
-        snprintf(value, RCF_MAX_VAL, "%u", map->value_size);
+        *val = (int32_t)map->value_size;
+    /* cm type is int32: a value above INT32_MAX reads negative */
     else if ((strstr(oid, "/max_entries:") != NULL))
-        snprintf(value, RCF_MAX_VAL, "%u", map->max_entries);
+        *val = (int32_t)map->max_entries;
     else if ((strstr(oid, "/writable:") != NULL))
-        snprintf(value, RCF_MAX_VAL, "%d", map->writable ? 1 : 0);
+        *val = map->writable ? 1 : 0;
 
     return 0;
 }
@@ -1050,39 +1139,32 @@ bpf_get_map_params(unsigned int gid, const char *oid, char *value,
 /**
  * Get the value by key from BPF map.
  *
- * @param gid           Group identifier (unused).
- * @param oid           Full object instance identifier.
- * @param[out] value    Obtained value.
- * @param bpf_id        BPF object id.
- * @param map_name      Map name.
- * @param view          View of the map (unused).
- * @param key_str       Key from the map.
+ * @param ctx           Request context.
+ * @param[out] value_buf Obtained value.
  *
  * @return Status code.
  */
 static te_errno
-bpf_get_map_kv_pair(unsigned int gid, const char *oid, char *value_str,
-                    const char *bpf_id, const char *map_name, const char *view,
-                    const char *key_str)
+bpf_get_map_kv_pair(const ta_conf_ctx *ctx, te_string *value_buf)
 {
+    const char *key_str = ta_conf_ctx_inst(ctx, "key");
     struct bpf_map_entry *map;
     unsigned char *key, *value;
-    te_string value_buf = TE_STRING_EXT_BUF_INIT(value_str, RCF_MAX_VAL);
     te_errno rc = 0;
 
-    UNUSED(gid);
-    UNUSED(oid);
-    UNUSED(view);
-
-    map = bpf_find_map(bpf_id, map_name);
+    map = bpf_find_map_by_ctx(ctx);
     if (map == NULL)
     {
         ERROR("Map isn't found.");
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
     }
 
+    rc = bpf_check_hex_len(map->value_size * map->n_values);
+    if (rc != 0)
+        return rc;
+
     key = TE_ALLOC(map->key_size);
-    value = TE_ALLOC(map->value_size * map->n_values);
+    value = TE_ALLOC(map->kern_value_size);
 
     rc = te_str_hex_str2raw(key_str, key, map->key_size);
     if (rc != 0)
@@ -1103,7 +1185,7 @@ bpf_get_map_kv_pair(unsigned int gid, const char *oid, char *value_str,
         goto fail_free_key_value;
     }
 
-    rc = te_str_hex_raw2str(value, map->value_size * map->n_values, &value_buf);
+    rc = te_str_hex_raw2str(value, map->value_size * map->n_values, value_buf);
 
 fail_free_key_value:
     free(value);
@@ -1114,42 +1196,34 @@ fail_free_key_value:
 /**
  * Get list of keys from BPF map.
  *
- * @param gid           Group identifier (unused).
- * @param oid           Full identifier of the father instance.
- * @param sub_id        ID of the object to be listed (unused).
- * @param list          Location for the list pointer.
- * @param bpf_id        BPF object id.
- * @param map_name      Map name.
+ * @param ctx           Request context (the OID is the one of the view).
+ * @param names         Vector to append instance names to.
  *
  * @return      Status code
  */
 static te_errno
-bpf_list_map_kv_pair(unsigned int gid, const char *oid, const char *sub_id,
-                     char **list, const char *bpf_id, const char *map_name)
+bpf_list_map_kv_pair(const ta_conf_ctx *ctx, te_vec *names)
 {
-    te_string result = TE_STRING_INIT;
-    bool first = true;
     struct bpf_map_entry *map;
     void *key;
     void *prev_key = NULL;
     te_errno rc = 0;
     unsigned int i;
 
-    UNUSED(gid);
-    UNUSED(sub_id);
-
-    map = bpf_find_map(bpf_id, map_name);
+    map = bpf_find_map_by_ctx(ctx);
     if (map == NULL)
     {
         ERROR("Map isn't found.");
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
     }
 
-    if ((strstr(oid, "/writable:") != NULL) && !map->writable)
-    {
-        *list = result.ptr;
+    if ((strstr(ta_conf_ctx_oid(ctx), "/writable:") != NULL) &&
+        !map->writable)
         return 0;
-    }
+
+    rc = bpf_check_hex_len(map->key_size);
+    if (rc != 0)
+        return rc;
 
     key = TE_ALLOC(map->key_size);
     prev_key = TE_ALLOC(map->key_size);
@@ -1158,30 +1232,25 @@ bpf_list_map_kv_pair(unsigned int gid, const char *oid, const char *sub_id,
     while (bpf_map_get_next_key(map->fd, (i == 0) ? NULL : prev_key, key) == 0)
     {
         te_string buf_str = TE_STRING_INIT_STATIC(RCF_MAX_VAL);
+        char *name;
 
         rc = te_str_hex_raw2str((unsigned char *)key, map->key_size, &buf_str);
         if (rc != 0)
-            goto fail;
+            goto out;
 
-        te_string_append(&result, "%s%s", first ? "" : " ", buf_str.ptr);
-        first = false;
+        name = TE_STRDUP(buf_str.ptr);
+        TE_VEC_APPEND(names, name);
 
         memcpy(prev_key, key, map->key_size);
 
         if (++i > map->max_entries)
         {
             rc = TE_RC(TE_TA_UNIX, TE_EOVERFLOW);
-            goto fail;
+            goto out;
         }
     }
 
-    free(key);
-    free(prev_key);
-    *list = result.ptr;
-    return 0;
-
-fail:
-    te_string_free(&result);
+out:
     free(key);
     free(prev_key);
     return rc;
@@ -1191,37 +1260,27 @@ fail:
  * Set the writable map view. If writable map view is enabled then the map can
  * be modified by user but it must not be modified by BPF program.
  *
- * @param gid           Group identifier (unused).
- * @param oid           Full object instance identifier (unused).
- * @param value         New value.
- * @param bpf_id        BPF object id.
- * @param map_name      Map name.
+ * @param ctx           Request context.
+ * @param val           New value.
  *
  * @return Status code.
  */
 static te_errno
-bpf_set_map_writable(unsigned int gid, const char *oid, const char *value,
-                     const char *bpf_id, const char *map_name)
+bpf_set_map_writable(const ta_conf_ctx *ctx, int32_t val)
 {
     struct bpf_map_entry *map;
-    unsigned int state;
-    te_errno rc = 0;
 
-    UNUSED(gid);
-    UNUSED(oid);
-
-    map = bpf_find_map(bpf_id, map_name);
+    map = bpf_find_map_by_ctx(ctx);
     if (map == NULL)
     {
         ERROR("Map isn't found.");
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
     }
 
-    rc = te_strtoui(value, 0, &state);
-    if (rc != 0)
-        return rc;
+    if (val < 0)
+        return TE_RC(TE_TA_UNIX, TE_EOVERFLOW);
 
-    map->writable = state;
+    map->writable = (val != 0);
 
     return 0;
 }
@@ -1232,18 +1291,15 @@ bpf_set_map_writable(unsigned int gid, const char *oid, const char *value,
  * is removed.
  */
 static te_errno
-bpf_set_map_pin(unsigned int gid, const char *oid, const char *value,
-                const char *bpf_id, const char *map_name)
+bpf_set_map_pin(const ta_conf_ctx *ctx, const char *value)
 {
+    const char *map_name = ta_conf_ctx_inst(ctx, "map");
     struct bpf_map_entry *map;
     const char *cur_path = NULL;
     te_errno rc = 0;
     int ret = 0;
 
-    UNUSED(gid);
-    UNUSED(oid);
-
-    map = bpf_find_map(bpf_id, map_name);
+    map = bpf_find_map_by_ctx(ctx);
     if (map == NULL)
     {
         ERROR("%s(): map %s isn't found", __FUNCTION__, map_name);
@@ -1299,17 +1355,13 @@ bpf_set_map_pin(unsigned int gid, const char *oid, const char *value,
  * Get path to a file to which BPF map is pinned currently.
  */
 static te_errno
-bpf_get_map_pin(unsigned int gid, const char *oid, char *value,
-                const char *bpf_id, const char *map_name)
+bpf_get_map_pin(const ta_conf_ctx *ctx, te_string *pin_path)
 {
+    const char *map_name = ta_conf_ctx_inst(ctx, "map");
     struct bpf_map_entry *map;
     te_errno rc = 0;
-    te_string pin_path = TE_STRING_EXT_BUF_INIT(value, RCF_MAX_VAL);
 
-    UNUSED(gid);
-    UNUSED(oid);
-
-    map = bpf_find_map(bpf_id, map_name);
+    map = bpf_find_map_by_ctx(ctx);
     if (map == NULL)
     {
         ERROR("%s(): map %s isn't found", __FUNCTION__, map_name);
@@ -1317,12 +1369,9 @@ bpf_get_map_pin(unsigned int gid, const char *oid, char *value,
     }
 
     if (!bpf_map__is_pinned(map->map))
-    {
-        *value = '\0';
         return 0;
-    }
 
-    rc = te_string_append_chk(&pin_path, "%s",
+    rc = te_string_append_chk(pin_path, "%s",
                               bpf_map__get_pin_path(map->map));
     if (rc != 0)
     {
@@ -1338,29 +1387,19 @@ bpf_get_map_pin(unsigned int gid, const char *oid, char *value,
  * Delete key/value pair from the BPF map. For ARRAY map it removes only value
  * because keys are just indexes and can not be added or deleted.
  *
- * @param gid           Group identifier (unused).
- * @param oid           Full object instance identifier (unused).
- * @param bpf_id        BPF object id.
- * @param map_name      Map name.
- * @param view          View of the map (unused).
- * @param key_str       Key from the map.
+ * @param ctx           Request context.
  *
  * @return Status code.
  */
 static te_errno
-bpf_del_map_writable_kv_pair(unsigned int gid, const char *oid,
-                             const char *bpf_id, const char *map_name,
-                             const char *view, const char *key_str)
+bpf_del_map_writable_kv_pair(const ta_conf_ctx *ctx)
 {
+    const char *key_str = ta_conf_ctx_inst(ctx, "key");
     struct bpf_map_entry *map;
     unsigned char *key;
     te_errno rc = 0;
 
-    UNUSED(gid);
-    UNUSED(oid);
-    UNUSED(view);
-
-    map = bpf_find_map(bpf_id, map_name);
+    map = bpf_find_map_by_ctx(ctx);
     if (map == NULL)
     {
         ERROR("Map isn't found.");
@@ -1405,38 +1444,21 @@ free_key:
 /**
  * Update existing key/value pair in the BPF map or add new one.
  *
- * @param gid           Group identifier (unused).
- * @param oid           Full object instance identifier (unused).
+ * @param ctx           Request context.
  * @param value_str     New value.
- * @param bpf_id        BPF object id.
- * @param map_name      Map name.
- * @param view          View of the map (unused).
- * @param key_str       Key.
  *
  * @return Status code.
  */
 static te_errno
-bpf_update_map_writable_kv_pair(unsigned int gid, const char *oid,
-                                const char *value_str, const char *bpf_id,
-                                const char *map_name, const char *view,
-                                const char *key_str)
+bpf_update_map_writable_kv_pair(const ta_conf_ctx *ctx, const char *value_str)
 {
+    const char *key_str = ta_conf_ctx_inst(ctx, "key");
     struct bpf_map_entry *map;
     unsigned char *key, *value;
     unsigned int update_flags = BPF_ANY;
     te_errno rc = 0;
 
-    UNUSED(gid);
-    UNUSED(oid);
-    UNUSED(view);
-
-    if (value_str == NULL)
-    {
-        ERROR("Value should be specified to update key/value pair in the map.");
-        return TE_RC(TE_TA_UNIX, TE_EINVAL);
-    }
-
-    map = bpf_find_map(bpf_id, map_name);
+    map = bpf_find_map_by_ctx(ctx);
     if (map == NULL)
     {
         ERROR("Map isn't found.");
@@ -1455,7 +1477,7 @@ bpf_update_map_writable_kv_pair(unsigned int gid, const char *oid,
     if (rc != 0)
         goto fail_free_key;
 
-    value = TE_ALLOC(map->value_size * map->n_values);
+    value = TE_ALLOC(map->kern_value_size);
 
     rc = te_str_hex_str2raw(value_str, value, map->value_size * map->n_values);
     if (rc != 0)
@@ -1597,35 +1619,31 @@ bpf_perf_events_num(bpf_perf_map_entry *map)
 /**
  * Common getter function for the BPF perf_event map parameters.
  *
- * @param[in] gid       Group identifier (unused).
- * @param[in] oid       Full object instance identifier.
- * @param[out] value    Obtained value.
- * @param[in] bpf_id    BPF object id.
- * @param[in] map_name  Map name.
+ * @param[in] ctx       Request context.
+ * @param[out] val      Obtained value.
  *
  * @return Status code.
  */
 static te_errno
-bpf_get_perf_map_params(unsigned int gid, const char *oid, char *value,
-                        const char *bpf_id, const char *map_name)
+bpf_get_perf_map_params(const ta_conf_ctx *ctx, int32_t *val)
 {
+    const char *oid = ta_conf_ctx_oid(ctx);
     struct bpf_perf_map_entry *map;
 
-    UNUSED(gid);
-
-    map = bpf_find_perf_map(bpf_id, map_name);
+    map = bpf_find_perf_map_by_ctx(ctx);
     if (map == NULL)
     {
-        ERROR("%s(): Map %s isn't found.", __FUNCTION__, map_name);
+        ERROR("%s(): Map %s isn't found.", __FUNCTION__,
+              ta_conf_ctx_inst(ctx, "perf_map"));
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
     }
 
     if (strstr(oid, "/num_events:") != NULL)
-        snprintf(value, RCF_MAX_VAL, "%u", bpf_perf_events_num(map));
+        *val = (int32_t)bpf_perf_events_num(map);
     else if ((strstr(oid, "/event_size:") != NULL))
-        snprintf(value, RCF_MAX_VAL, "%u", map->event_size);
+        *val = (int32_t)map->event_size;
     else if ((strstr(oid, "/events_enable:") != NULL))
-        snprintf(value, RCF_MAX_VAL, "%u", map->events_enabled ? 1 : 0);
+        *val = map->events_enabled ? 1 : 0;
 
     return 0;
 }
@@ -1901,34 +1919,30 @@ bpf_xdp_perf_map_enable(bpf_perf_map_entry *map, bool enable)
 /**
  * Common setter function for the BPF perf_event map parameters.
  *
- * @param gid           Group identifier (unused).
- * @param oid           Full object instance identifier.
- * @param value         Set value.
- * @param bpf_id        BPF object id.
- * @param map_name      Map name.
+ * @param ctx           Request context.
+ * @param val           Set value.
  *
  * @return Status code.
  */
 static te_errno
-bpf_set_perf_map_params(unsigned int gid, const char *oid, char *value,
-                        const char *bpf_id, const char *map_name)
+bpf_set_perf_map_params(const ta_conf_ctx *ctx, int32_t val)
 {
+    const char                 *oid = ta_conf_ctx_oid(ctx);
     struct bpf_perf_map_entry  *map;
     unsigned int                param;
     te_errno                    rc = 0;
 
-    UNUSED(gid);
-
-    map = bpf_find_perf_map(bpf_id, map_name);
+    map = bpf_find_perf_map_by_ctx(ctx);
     if (map == NULL)
     {
-        ERROR("%s(): Map %s isn't found.", __FUNCTION__, map_name);
+        ERROR("%s(): Map %s isn't found.", __FUNCTION__,
+              ta_conf_ctx_inst(ctx, "perf_map"));
         return TE_RC(TE_TA_UNIX, TE_ENOENT);
     }
 
-    rc = te_strtoui(value, 0, &param);
-    if (rc != 0)
-        return rc;
+    if (val < 0)
+        return TE_RC(TE_TA_UNIX, TE_EOVERFLOW);
+    param = val;
 
     if ((strstr(oid, "/event_size:") != NULL))
         map->event_size = param;
@@ -1939,33 +1953,23 @@ bpf_set_perf_map_params(unsigned int gid, const char *oid, char *value,
 }
 
 /**
- * Get data from the event that matches @p id_str ID.
+ * Get data from the event that the request addresses.
  *
- * @param[in] gid           Group identifier (unused).
- * @param[in] oid           Full object instance identifier (unused).
- * @param[out] value_str    Obtained value.
- * @param[in] bpf_id        BPF object id.
- * @param[in] map_name      Map name.
- * @param[in] id_str        Event ID.
+ * @param[in] ctx           Request context.
+ * @param[out] value_buf    Obtained value.
  *
  * @return Status code.
  */
 static te_errno
-bpf_get_perf_map_event(unsigned int gid, const char *oid, char *value_str,
-                       const char *bpf_id, const char *map_name,
-                       const char *id_str)
+bpf_get_perf_map_event(const ta_conf_ctx *ctx, te_string *value_buf)
 {
+    const char                 *id_str = ta_conf_ctx_inst(ctx, "id");
     struct bpf_perf_map_entry  *map;
-    te_string                   value_buf = TE_STRING_EXT_BUF_INIT(
-                                                    value_str, RCF_MAX_VAL);
     te_errno                    rc = 0;
     unsigned int                id = 0;
     bpf_perf_map_event          event;
 
-    UNUSED(gid);
-    UNUSED(oid);
-
-    map = bpf_find_perf_map(bpf_id, map_name);
+    map = bpf_find_perf_map_by_ctx(ctx);
     if (map == NULL)
     {
         ERROR("%s(): Map isn't found.", __FUNCTION__);
@@ -1986,25 +1990,37 @@ bpf_get_perf_map_event(unsigned int gid, const char *oid, char *value_str,
         return rc;
     }
 
+    if (id >= te_vec_size(&map->events))
+    {
+        ERROR("%s(): Event %u isn't found.", __FUNCTION__, id);
+        return TE_RC(TE_TA_UNIX, TE_ENOENT);
+    }
+
+    rc = bpf_check_hex_len(map->event_size);
+    if (rc != 0)
+        return rc;
+
     event = TE_VEC_GET(bpf_perf_map_event, &map->events, id);
-    rc = te_str_hex_raw2str(event.data, map->event_size, &value_buf);
+    rc = te_str_hex_raw2str(event.data, map->event_size, value_buf);
 
     return rc;
 }
 
+/**
+ * Get list of the events of a BPF perf_event map.
+ *
+ * @param ctx       Request context.
+ * @param names     Vector to append instance names to.
+ *
+ * @return Status code.
+ */
 static te_errno
-bpf_list_perf_map_event(unsigned int gid, const char *oid, const char *sub_id,
-                        char **list, const char *bpf_id, const char *map_name)
+bpf_list_perf_map_event(const ta_conf_ctx *ctx, te_vec *names)
 {
-    te_string                   result = TE_STRING_INIT;
     struct bpf_perf_map_entry  *map = NULL;
     unsigned int                i = 0;
 
-    UNUSED(gid);
-    UNUSED(oid);
-    UNUSED(sub_id);
-
-    map = bpf_find_perf_map(bpf_id, map_name);
+    map = bpf_find_perf_map_by_ctx(ctx);
     if (map == NULL)
     {
         ERROR("%s(): Map isn't found.", __FUNCTION__);
@@ -2013,91 +2029,47 @@ bpf_list_perf_map_event(unsigned int gid, const char *oid, const char *sub_id,
 
     for (i = 0; i < map->num_events; ++i)
     {
-        te_string_append(&result, "%s%u", i == 0 ? "" : " ", i);
+        char *name = te_string_fmt("%u", i);
+
+        TE_VEC_APPEND(names, name);
     }
 
-    *list = result.ptr;
     return 0;
 }
 
 /*
  * Test Agent /bpf configuration subtree.
  */
-RCF_PCH_CFG_NODE_RW_COLLECTION(node_bpf_map_writable_key, "key", NULL,
-                               NULL, bpf_get_map_kv_pair,
-                               bpf_update_map_writable_kv_pair,
-                               bpf_update_map_writable_kv_pair,
-                               bpf_del_map_writable_kv_pair,
-                               bpf_list_map_kv_pair, NULL);
-
-RCF_PCH_CFG_NODE_RW(node_bpf_map_writable, "writable",
-                    &node_bpf_map_writable_key, NULL, bpf_get_map_params,
-                    bpf_set_map_writable);
-
-RCF_PCH_CFG_NODE_RO_COLLECTION(node_bpf_map_ro_key, "key", NULL,
-                               NULL, bpf_get_map_kv_pair, bpf_list_map_kv_pair);
-
-RCF_PCH_CFG_NODE_NA(node_bpf_map_ro, "read_only", &node_bpf_map_ro_key,
-                    &node_bpf_map_writable);
-
-RCF_PCH_CFG_NODE_RO(node_bpf_map_max_entries, "max_entries", NULL,
-                    &node_bpf_map_ro, bpf_get_map_params);
-
-RCF_PCH_CFG_NODE_RO(node_bpf_map_value_size, "value_size", NULL,
-                    &node_bpf_map_max_entries, bpf_get_map_params);
-
-RCF_PCH_CFG_NODE_RO(node_bpf_map_key_size, "key_size", NULL,
-                    &node_bpf_map_value_size, bpf_get_map_params);
-
-RCF_PCH_CFG_NODE_RO(node_bpf_map_type, "type", NULL,
-                    &node_bpf_map_key_size, bpf_get_map_params);
-
-RCF_PCH_CFG_NODE_RW(node_bpf_map_pin, "pin",
-                    NULL, &node_bpf_map_type,
-                    bpf_get_map_pin, bpf_set_map_pin);
-
-RCF_PCH_CFG_NODE_RO_COLLECTION(node_bpf_map, "map", &node_bpf_map_pin,
-                               NULL, NULL, bpf_prog_map_list);
-
-RCF_PCH_CFG_NODE_RO_COLLECTION(node_bpf_perf_map_events_id, "id",
-                    NULL, NULL,
-                    bpf_get_perf_map_event,
-                    bpf_list_perf_map_event);
-
-RCF_PCH_CFG_NODE_RO(node_bpf_perf_map_num_events, "num_events",
-                    NULL, &node_bpf_perf_map_events_id,
-                    bpf_get_perf_map_params);
-
-RCF_PCH_CFG_NODE_RW(node_bpf_perf_map_events, "events_enable",
-                    NULL, &node_bpf_perf_map_num_events,
-                    bpf_get_perf_map_params,
-                    bpf_set_perf_map_params);
-
-RCF_PCH_CFG_NODE_RW(node_bpf_perf_map_event_size, "event_size",
-                    NULL, &node_bpf_perf_map_events,
-                    bpf_get_perf_map_params,
-                    bpf_set_perf_map_params);
-
-RCF_PCH_CFG_NODE_RO_COLLECTION(node_bpf_perf_map, "perf_map",
-                               &node_bpf_perf_map_event_size,
-                               &node_bpf_map,
-                               NULL, bpf_prog_map_list);
-
-RCF_PCH_CFG_NODE_RO_COLLECTION(node_bpf_prog, "program", NULL,
-                               &node_bpf_perf_map, NULL, bpf_prog_map_list);
-
-RCF_PCH_CFG_NODE_RW(node_bpf_state, "state", NULL,
-                    &node_bpf_prog, bpf_get_params, bpf_set_state);
-
-RCF_PCH_CFG_NODE_RW(node_bpf_type, "type", NULL,
-                    &node_bpf_state, bpf_get_params, bpf_set_type);
-
-RCF_PCH_CFG_NODE_RW(node_bpf_filepath, "filepath", NULL,
-                    &node_bpf_type, bpf_get_params, bpf_set_filepath);
-
-RCF_PCH_CFG_NODE_COLLECTION(node_bpf, "bpf",
-                            &node_bpf_filepath, NULL,
-                            bpf_add, bpf_del, bpf_list, NULL);
+static const ta_conf_node *const node_bpf =
+    TA_CONF_COLL("bpf", bpf_add, bpf_del, bpf_list,
+        TA_CONF_RW_STR("filepath", bpf_get_params, bpf_set_filepath),
+        TA_CONF_RW_STR("type", bpf_get_params, bpf_set_type),
+        TA_CONF_RW_STR("state", bpf_get_params, bpf_set_state),
+        TA_CONF_LIST("program", bpf_prog_list),
+        TA_CONF_LIST("perf_map", bpf_perf_map_list,
+            TA_CONF_RW_INT32("event_size", bpf_get_perf_map_params,
+                             bpf_set_perf_map_params),
+            TA_CONF_RW_INT32("events_enable", bpf_get_perf_map_params,
+                             bpf_set_perf_map_params),
+            TA_CONF_RO_INT32("num_events", bpf_get_perf_map_params),
+            TA_CONF_RO_COLL("id", bpf_get_perf_map_event,
+                            bpf_list_perf_map_event)),
+        TA_CONF_LIST("map", bpf_map_list,
+            TA_CONF_RW_STR("pin", bpf_get_map_pin, bpf_set_map_pin),
+            TA_CONF_RO_STR("type", bpf_get_map_type),
+            TA_CONF_RO_INT32("key_size", bpf_get_map_params_int),
+            TA_CONF_RO_INT32("value_size", bpf_get_map_params_int),
+            TA_CONF_RO_INT32("max_entries", bpf_get_map_params_int),
+            TA_CONF_NA("read_only",
+                TA_CONF_RO_COLL("key", bpf_get_map_kv_pair,
+                                bpf_list_map_kv_pair)),
+            TA_CONF_RW_INT32("writable", bpf_get_map_params_int,
+                             bpf_set_map_writable,
+                TA_CONF_COLL_STR_RW("key", bpf_get_map_kv_pair,
+                                    bpf_update_map_writable_kv_pair,
+                                    bpf_update_map_writable_kv_pair,
+                                    bpf_del_map_writable_kv_pair,
+                                    bpf_list_map_kv_pair))));
 
 /**
  * Initialization of the BPF configuration subtrees.
@@ -2107,7 +2079,7 @@ RCF_PCH_CFG_NODE_COLLECTION(node_bpf, "bpf",
 te_errno
 ta_unix_conf_bpf_init(void)
 {
-    return rcf_pch_add_node("/agent/", &node_bpf);
+    return ta_conf_register("/agent/", node_bpf);
 }
 
 /**
@@ -2176,32 +2148,24 @@ xdp_find(unsigned int ifindex)
 /**
  * Get oid of the XDP program that is linked to the interface.
  *
- * @param gid           Group identifier (unused).
- * @param oid           Full object instance identifier (unused).
- * @param[out] value    Obtained value.
- * @param ifname        Interface name.
+ * @param ctx           Request context.
+ * @param[out] val      Obtained value.
  *
  * @return Status code.
  */
 static te_errno
-bpf_get_if_xdp(unsigned int gid, const char *oid, char *value,
-               const char *ifname)
+bpf_get_if_xdp(const ta_conf_ctx *ctx, te_string *val)
 {
+    const char *ifname = ta_conf_ctx_inst(ctx, "interface");
     struct xdp_entry *xdp;
     unsigned int ifindex = if_nametoindex(ifname);
 
-    UNUSED(gid);
-    UNUSED(oid);
-
     xdp = xdp_find(ifindex);
     if (xdp == NULL)
-    {
-        *value = '\0';
         return 0;
-    }
 
-    snprintf(value, RCF_MAX_VAL, "/agent:%s/bpf:%u/program:%s", ta_name, xdp->bpf_id,
-             xdp->prog);
+    te_string_append(val, "/agent:%s/bpf:%u/program:%s", ta_name, xdp->bpf_id,
+                     xdp->prog);
     return 0;
 }
 
@@ -2307,24 +2271,19 @@ fail:
  * Set oid of the XDP program that should be linked to the interface. Calls to
  * link/unlink XDP programs.
  *
- * @param gid           Group identifier (unused).
- * @param oid           Full object instance identifier (unused).
+ * @param ctx           Request context.
  * @param value         New value.
- * @param ifname        Interface name.
  *
  * @return Status code.
  */
 static te_errno
-bpf_set_if_xdp(unsigned int gid, const char *oid, const char *value,
-               const char *ifname)
+bpf_set_if_xdp(const ta_conf_ctx *ctx, const char *value)
 {
+    const char *ifname = ta_conf_ctx_inst(ctx, "interface");
     struct xdp_entry *xdp_old = NULL;
     unsigned int ifindex = if_nametoindex(ifname);
     unsigned int xdp_flags = XDP_FLAGS_UPDATE_IF_NOEXIST;
     te_errno rc = 0;
-
-    UNUSED(gid);
-    UNUSED(oid);
 
     if (!rcf_pch_rsrc_accessible("/agent:%s/interface:%s", ta_name, ifname))
         return TE_RC(TE_TA_UNIX, TE_ENODEV);
@@ -2345,8 +2304,10 @@ bpf_set_if_xdp(unsigned int gid, const char *oid, const char *value,
     }
     else
     {
-        rc = bpf_add_and_link_xdp(cfg_convert_oid_str(value), ifindex,
-                                  xdp_flags);
+        cfg_oid *prog_oid = cfg_convert_oid_str(value);
+
+        rc = bpf_add_and_link_xdp(prog_oid, ifindex, xdp_flags);
+        cfg_free_oid(prog_oid);
         if (rc != 0)
             return rc;
     }
@@ -2363,8 +2324,8 @@ bpf_set_if_xdp(unsigned int gid, const char *oid, const char *value,
 /*
  * Test Agent /xdp configuration subtree.
  */
-RCF_PCH_CFG_NODE_RW(node_if_xdp, "xdp", NULL,
-                    NULL, bpf_get_if_xdp, bpf_set_if_xdp);
+static const ta_conf_node *const node_if_xdp =
+    TA_CONF_RW_STR("xdp", bpf_get_if_xdp, bpf_set_if_xdp);
 
 /**
  * Initialization of the XDP configuration subtrees.
@@ -2374,7 +2335,7 @@ RCF_PCH_CFG_NODE_RW(node_if_xdp, "xdp", NULL,
 te_errno
 ta_unix_conf_if_xdp_init(void)
 {
-    return rcf_pch_add_node("/agent/interface/", &node_if_xdp);
+    return ta_conf_register("/agent/interface/", node_if_xdp);
 }
 
 /**
@@ -2418,17 +2379,24 @@ int conf_bpf_fd_by_prog_oid(const char *prog_oid_str)
     const char *prog_name = NULL;
     cfg_oid *prog_oid = NULL;
     struct bpf_prog_entry *prog;
+    int fd = -1;
 
     prog_oid = cfg_convert_oid_str(prog_oid_str);
     if (prog_oid == NULL)
         return -1;
 
-    bpf_id_str = CFG_OID_GET_INST_NAME(prog_oid, BPF_PROG_OID_LEVEL_OBJ_ID);
-    prog_name = CFG_OID_GET_INST_NAME(prog_oid, BPF_PROG_OID_LEVEL_NAME);
+    if (prog_oid->inst && prog_oid->len == BPF_PROG_OID_LEVELS)
+    {
+        bpf_id_str = CFG_OID_GET_INST_NAME(prog_oid,
+                                           BPF_PROG_OID_LEVEL_OBJ_ID);
+        prog_name = CFG_OID_GET_INST_NAME(prog_oid, BPF_PROG_OID_LEVEL_NAME);
 
-    prog = bpf_find_prog(bpf_id_str, prog_name);
-    if (prog == NULL)
-        return -1;
+        prog = bpf_find_prog(bpf_id_str, prog_name);
+        if (prog != NULL)
+            fd = prog->fd;
+    }
 
-    return prog->fd;
+    cfg_free_oid(prog_oid);
+
+    return fd;
 }
