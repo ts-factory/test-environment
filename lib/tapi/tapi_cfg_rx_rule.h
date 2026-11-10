@@ -221,7 +221,8 @@ extern te_errno tapi_cfg_rx_rule_fill_ip_addrs_ports(
                                            const struct sockaddr *dst_mask);
 
 /**
- * Commit changes made to Rx rule.
+ * Commit changes made to Rx rule and synchronize Rx rules with the Test
+ * Agent, so that the getters return the rule as the driver reports it.
  *
  * @param ta          Test Agent
  * @param if_name     Interface name

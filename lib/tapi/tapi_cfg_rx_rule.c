@@ -419,11 +419,14 @@ tapi_cfg_rx_rule_commit(const char *ta,
     RULE_ACCESSOR_START;
 
     rc = cfg_commit(rule_oid);
-    if (rc == 0 && location < 0)
+    if (rc == 0)
     {
         /*
-         * Special insertion location was used - added rule will appear
-         * under its real location after synchronization.
+         * If special insertion location was used, added rule will appear
+         * under its real location after synchronization. In any case
+         * Configurator does not read values back after a commit, and a
+         * driver may apply a rule that differs from the requested one:
+         * get what the driver reports.
          */
         rc = cfg_synchronize_fmt(
                               true, "/agent:%s/interface:%s/rx_rules:",
