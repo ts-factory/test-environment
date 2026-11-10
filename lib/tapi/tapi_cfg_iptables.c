@@ -94,6 +94,19 @@ tapi_cfg_iptables_chain_add(const char *ta,
     INFO("Add/Set iptables chain (TA:%s, ifname:%s, table:%s, chain:%s) %s",
          ta, ifname, table, chain, enable ? "ON" : "OFF");
 
+    /*
+     * The tables of an interface that appeared after the last
+     * synchronization are not in the database yet, and neither are
+     * chains created outside TE.
+     */
+    if ((rc = cfg_synchronize_fmt(true, "/agent:%s/interface:%s/iptables:%s",
+                                  ta, ifname, af_str(af))) != 0)
+    {
+        ERROR("Error while synchronizing iptables tables on %s Agent, rc=%r",
+              ta, rc);
+        return rc;
+    }
+
     if ((rc = cfg_find_fmt(&handle, "/agent:%s/interface:%s/iptables:%s"
                            "/table:%s/chain:%s", ta, ifname, af_str(af),
                            table, chain)) == 0)
