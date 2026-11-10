@@ -123,6 +123,15 @@ tapi_cfg_if_fc_get(const char *ta, const char *ifname,
 {
     te_errno rc;
 
+    /*
+     * Configurator does not read values back after a commit, and a
+     * driver may change them (after autonegotiation, for example):
+     * get what the driver reports.
+     */
+    rc = cfg_synchronize_fmt(true, COMMON_FMT, ta, ifname);
+    if (rc != 0)
+        return rc;
+
     rc = tapi_cfg_if_fc_autoneg_get(ta, ifname,
                                     &params->autoneg);
     if (rc != 0)
