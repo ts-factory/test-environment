@@ -387,6 +387,23 @@ extern te_errno cfg_get_brother(cfg_handle handle, cfg_handle *brother);
  * @returns Status code
  */
 extern te_errno cfg_get_father(cfg_handle handle, cfg_handle *father);
+
+/**
+ * Check whether an object instance exists only in the Configurator
+ * database: it or one of its ancestors was added locally, and the addition
+ * is not committed to the Test Agent yet.
+ *
+ * Configurator serves this request while a local command sequence is
+ * open, and does not synchronise anything with Test Agents for it.
+ *
+ * @param handle    Object instance handle.
+ * @param local     Location for the result.
+ *
+ * @return Status code.
+ * @retval TE_EINVAL    @p handle is not an instance handle.
+ * @retval TE_ENOENT    There is no instance with @p handle.
+ */
+extern te_errno cfg_instance_is_local(cfg_handle handle, bool *local);
 /**@}*/
 
 /** @defgroup confapi_base_access Configuration tree access operations
@@ -997,6 +1014,19 @@ extern te_errno cfg_restore_backup_ta(const char *ta, const char *name);
  * @return Status code (see te_errno.h)
  */
 extern te_errno cfg_restore_backup_nohistory(const char *name);
+
+/**
+ * Restore the backup from the configuration history only. Unlike
+ * cfg_restore_backup(), do not fall back to the backup file if the
+ * rollback fails, so that a test can check the rollback itself.
+ *
+ * @param name      name returned by cfg_create_backup
+ *
+ * @return Status code (see te_errno.h): the error of the rollback, or of
+ *         the check of its result against the backup. After a failure the
+ *         configuration is synchronized with the agents and left as it is.
+ */
+extern te_errno cfg_restore_backup_history(const char *name);
 
 
 /**

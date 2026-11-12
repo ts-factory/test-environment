@@ -52,6 +52,19 @@ extern char max_commit_subtree[CFG_INST_NAME_MAX];
 extern char *local_cmd_bkp;
 
 /**
+ * End the local command sequence and roll it back: undo its additions
+ * and deletions in the database, then synchronise the subtree of the
+ * sequence with Test Agents. The restore from history leaves the values
+ * set locally in the database, and a failed commit may have changed an
+ * agent: the synchronisation makes the database show what the agents
+ * have. Nothing of the sequence is sent to Test Agents.
+ *
+ * @return Status code of restoring the backup taken at the start of
+ *         the sequence, or of the synchronisation.
+ */
+extern te_errno cfg_local_seq_rollback(void);
+
+/**
  * Reboot all Test Agents (before re-initializing of the Configurator).
  */
 extern void cfg_ta_reboot_all(void);
@@ -92,6 +105,18 @@ extern int cfg_ta_add_agent_instances(void);
  * @return status code (see te_errno.h)
  */
 extern int cfg_tas_commit(const char *oid);
+
+/**
+ * Commit the values of instances in Configurator database to a Test
+ * Agent in one group, which the Test Agent applies at once. Unlike
+ * cfg_tas_commit(), only the instances are sent, not their subtrees.
+ *
+ * @param ta        Test Agent name.
+ * @param oids      OIDs of the instances (strings).
+ *
+ * @return Status code.
+ */
+extern te_errno cfg_ta_commit_oids(const char *ta, const te_vec *oids);
 
 /**
  * Synchronize dependant nodes.

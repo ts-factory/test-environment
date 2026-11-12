@@ -71,6 +71,8 @@ enum {
     CFG_TREE_PRINT,/**< Print a tree of obj|ins from a prefix */
     CFG_PROCESS_HISTORY,/**< Process history configuration file
                              IN: file name, key-value pairs to substitute */
+    CFG_IS_LOCAL,  /**< Whether an instance exists only in the database:
+                        IN: handle; OUT: flag */
 };
 
 /* Set of generic fields of the Configurator message */
@@ -154,6 +156,14 @@ typedef struct cfg_family_msg {
 #define CFG_SON         3
     cfg_handle    handle;   /**< Object handle (IN and OUT) */
 } cfg_family_msg;
+
+/** CFG_IS_LOCAL message content */
+typedef struct cfg_is_local_msg {
+    CFG_MSG_FIELDS
+    cfg_handle    handle;   /**< IN: object instance handle */
+    bool          local;    /**< OUT: whether the instance exists only in
+                                 the database */
+} cfg_is_local_msg;
 
 /** CFG_ADD message content  */
 typedef struct cfg_add_msg {
@@ -279,6 +289,9 @@ typedef struct cfg_backup_msg {
 
 /** Restore configuration backup w/o trying to process history */
 #define CFG_BACKUP_RESTORE_NOHISTORY  5
+
+/** Restore configuration backup from history only, w/o the backup file */
+#define CFG_BACKUP_RESTORE_HISTORY    6
     unsigned int subtrees_num; /**< Number of subtrees */
     size_t subtrees_offset;    /**< Offset to subtrees string from message
                                     start. The string must contain subtrees
