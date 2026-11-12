@@ -39,6 +39,8 @@ Parameters:
   - `TEST_ETHDEV_CONFIGURED`: configured, not started
   - `TEST_ETHDEV_STARTED`
 
+> impl: the port comes from the `iut_port` env.
+
 Steps:
 
 1. Initialize EAL and configure `iut_port`.
@@ -66,6 +68,7 @@ def test_full_document(tmp_path: Path) -> None:
     assert t.objective.startswith('Make sure that MTU-sized')
     assert t.type == 'use case'
     assert t.notes == ['A test-level remark.']
+    assert t.impl == ['the port comes from the `iut_port` env.']
     assert [p.name for p in t.params] == ['mtu', 'ethdev_state']
     vals = t.params[1].values
     assert vals[0].name == 'TEST_ETHDEV_CONFIGURED'
@@ -177,7 +180,7 @@ def test_heading_inside_test(tmp_path: Path) -> None:
         parse_package(write_pkg(tmp_path, 'p', body))
 
 
-def test_blockquote_outside_step(tmp_path: Path) -> None:
+def test_test_level_blockquote(tmp_path: Path) -> None:
     body = """\
     # p: S
 
@@ -185,7 +188,29 @@ def test_blockquote_outside_step(tmp_path: Path) -> None:
 
     O.
 
-    > stray quote
+    > impl: read the queue counters
+    > with the XDP program.
+
+    > Plain advice.
+
+    Steps:
+
+    1. A.
+    """
+    t = parse_package(write_pkg(tmp_path, 'p', body)).tests[0]
+    assert t.impl == ['read the queue counters with the XDP program.', 'Plain advice.']
+    assert t.notes == []
+
+
+def test_misaligned_blockquote(tmp_path: Path) -> None:
+    body = """\
+    # p: S
+
+    ## t: T
+
+    O.
+
+      > stray quote
 
     Steps:
 
@@ -310,4 +335,152 @@ def test_non_section_heading_still_rejected(tmp_path: Path) -> None:
     1. A.
     """
     with pytest.raises(ScenarioError, match='heading'):
+        parse_package(write_pkg(tmp_path, 'p', body))
+
+
+GROUPED = """\
+# p: S
+
+Group: suite_tests
+
+Planning prose that stays in the markdown.
+
+## Description
+
+What the package covers.
+
+### Common rules
+
+A rule every test follows.
+
+## t: T
+
+O.
+
+Steps:
+
+1. A.
+"""
+
+
+def test_group_defaults_to_package_name(tmp_path: Path) -> None:
+    pkg = parse_package(write_pkg(tmp_path, 'p', '# p: S\n'))
+    assert pkg.group == 'p'
+
+
+def test_group_label(tmp_path: Path) -> None:
+    pkg = parse_package(write_pkg(tmp_path, 'p', GROUPED))
+    assert pkg.group == 'suite_tests'
+
+
+def test_group_label_twice(tmp_path: Path) -> None:
+    body = GROUPED.replace('Group: suite_tests\n', 'Group: a\n\nGroup: b\n')
+    with pytest.raises(ScenarioError, match='duplicate "Group:"'):
+        parse_package(write_pkg(tmp_path, 'p', body))
+
+
+def test_group_label_after_heading(tmp_path: Path) -> None:
+    body = """\
+    # p: S
+
+    ## Referenced tests
+
+    Group: late
+    """
+    with pytest.raises(ScenarioError, match='"Group:" must come before'):
+        parse_package(write_pkg(tmp_path, 'p', body))
+
+
+def test_group_label_inside_paragraph_is_prose(tmp_path: Path) -> None:
+    body = """\
+    # p: S
+
+    A paragraph that wraps onto a line
+    Group: wrapped
+    """
+    assert parse_package(write_pkg(tmp_path, 'p', body)).group == 'p'
+
+
+def test_description(tmp_path: Path) -> None:
+    pkg = parse_package(write_pkg(tmp_path, 'p', GROUPED))
+    assert pkg.description == [
+        'What the package covers.',
+        '',
+        '### Common rules',
+        '',
+        'A rule every test follows.',
+    ]
+    assert pkg.description_line == 7
+    assert [t.name for t in pkg.tests] == ['t']
+
+
+def test_no_description(tmp_path: Path) -> None:
+    pkg = parse_package(write_pkg(tmp_path, 'p', FULL.replace('usecases', 'p')))
+    assert pkg.description == []
+
+
+def test_description_after_test(tmp_path: Path) -> None:
+    body = """\
+    # p: S
+
+    ## t: T
+
+    O.
+
+    Steps:
+
+    1. A.
+
+    ## Description
+
+    Too late.
+    """
+    with pytest.raises(ScenarioError, match='before the first test'):
+        parse_package(write_pkg(tmp_path, 'p', body))
+
+
+def test_description_after_referenced_test(tmp_path: Path) -> None:
+    body = """\
+    # p: S
+
+    - [other](other.md)
+
+    ## Description
+
+    Too late.
+    """
+    f = write_pkg(tmp_path, 'p', body)
+    other = tmp_path / 'p' / 'other.md'
+    other.write_text('# other: T\n\nO.\n\nSteps:\n\n1. A.\n', encoding='utf-8')
+    with pytest.raises(ScenarioError, match='before the first test'):
+        parse_package(f)
+
+
+def test_description_twice(tmp_path: Path) -> None:
+    body = """\
+    # p: S
+
+    ## Description
+
+    One.
+
+    ## Description
+
+    Two.
+    """
+    with pytest.raises(ScenarioError, match='duplicate "## Description"'):
+        parse_package(write_pkg(tmp_path, 'p', body))
+
+
+def test_description_rejects_test_reference(tmp_path: Path) -> None:
+    body = """\
+    # p: S
+
+    ## Description
+
+    Covers one test:
+
+    - [other](other.md)
+    """
+    with pytest.raises(ScenarioError, match='test reference inside "## Description"'):
         parse_package(write_pkg(tmp_path, 'p', body))

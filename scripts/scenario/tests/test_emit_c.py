@@ -44,6 +44,7 @@ main(int argc, char *argv[])
     /* enum: consider TEST_GET_ENUM_PARAM */
     TEST_GET_STRING_PARAM(ethdev_state);
 
+    /* IMPL: the port comes from the iut_port env. */
     TEST_STEP("Initialize EAL and configure iut_port.");
     /* The driver may round the value down; read it back.
      *
@@ -72,6 +73,7 @@ def make_test() -> tuple[Package, Test]:
         line=1,
         objective=('Make sure that MTU-sized packets pass and larger do not.'),
         type='use case',
+        impl=['the port comes from the `iut_port` env.'],
         params=[
             Param(name='mtu', description='MTU on IUT'),
             Param(
@@ -128,6 +130,13 @@ def test_golden() -> None:
         copyright_line='Copyright (C) 2026 OKTET Ltd.',
     )
     assert out == GOLDEN
+
+
+def test_ingroup_follows_package_group() -> None:
+    pkg, test = make_test()
+    pkg.group = 'suite_tests'
+    out = emit_test(pkg, test, author='A <a@b.c>', copyright_line='C')
+    assert '/** @defgroup usecases-set_mtu Set MTU of IUT\n * @ingroup suite_tests\n' in out
 
 
 def test_long_step_wraps() -> None:

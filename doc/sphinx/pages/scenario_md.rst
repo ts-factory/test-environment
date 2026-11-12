@@ -96,7 +96,10 @@ The rules:
   appear only once per package.
 * Inside a test, the first paragraph is the ``@objective``; a
   ``Type:`` paragraph sets the ``@type``; any other paragraph
-  before ``Steps:`` becomes a ``@note``.
+  before ``Steps:`` becomes a ``@note``. A blockquote there is
+  implementor advice for the test as a whole, placed in the stub
+  as a comment before the first step; it is not documented and
+  the drift check does not compare it.
 * ``Parameters:`` is followed by a list of
   :literal:`\`name\`: description` items; nested items list the
   values, optionally with a comment after a colon.
@@ -106,6 +109,80 @@ The rules:
   level below the test heading, with or without the colon:
   ``### Steps`` in a package file, ``## Steps`` in a per-test
   file. The label and heading forms mean the same thing.
+* ``## Description`` opens the package description; a
+  ``Group: <id>`` paragraph names the documentation group of the
+  package. Both are described below.
+
+Package description
+~~~~~~~~~~~~~~~~~~~
+
+Prose at the top level of a package document is for its readers
+only. What the package documentation should say goes under
+``## Description``:
+
+.. code-block:: markdown
+
+    # usecases: Reliability in normal use
+
+    Planning notes for the reviewers stay out of the documentation.
+
+    ## Description
+
+    The tests check the port in the states a user application
+    leaves it in.
+
+    ### Common rules
+
+    Every test reads the effective MTU back before using it.
+
+    ## set_mtu: Set MTU of IUT
+
+The rules:
+
+* The section is optional, appears at most once, and comes before
+  the first test - inline or referenced.
+* It runs up to the next second-level heading. Deeper headings
+  structure it; a test reference inside it is an error.
+* The documentation group of the package is the package name,
+  which is also the group the generated tests join with
+  ``@ingroup``. A ``Group: <id>`` paragraph before the first
+  second-level heading names another group, for instance the one
+  of the suite root.
+
+The ``scripts/md2dox`` doxygen input filter adds the description
+to the documentation of that group, on the page that lists the
+package's tests:
+
+.. code-block:: none
+
+    FILE_PATTERNS     = ... package.md
+    FILTER_PATTERNS   = ... *.md="${TE_BASE}/scripts/md2dox"
+    EXTENSION_MAPPING = ... md=C
+
+The filter pattern needs the wildcard: doxygen silently skips a
+filter whose pattern does not match the full path. Listing only
+``package.md`` in ``FILE_PATTERNS`` keeps a ``README.md`` and the
+per-test files out.
+
+The group is still defined where it was, in a ``package.dox`` for
+instance: the filter only adds to it with ``@addtogroup``. A build
+without the filter loses the description, never the group or its
+tests. Within the description:
+
+* the markdown stays markdown, doxygen renders it;
+* ``###`` to ``######`` headings become bold lines with a
+  ``<group>-<title>`` anchor, so ``### Common rules`` of package
+  ``dcb`` can be referred to as ``@ref dcb-common-rules``. They
+  are not made doxygen sections, which would add entries to the
+  navigation sidebar of the page;
+* ``> impl:`` blockquotes are left out: they advise the
+  implementor, as they do under a step.
+
+A test the document describes but the package does not implement
+yet - there is no ``<test>.c`` - gets a page as well, built from
+its section. It sits in the group with the implemented tests and
+opens with a warning that there is no test to run. Once the source
+exists, the page comes from it instead, under the same name.
 
 Steps, substeps and notes
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -175,6 +252,18 @@ The check compares the step texts, their order and their nesting
 against the markdown; comments are never compared. A ``.c`` file
 not described in any markdown is reported only with ``--strict``,
 so a suite can adopt scenario documents incrementally.
+
+The check also reports two mistakes that leave a page out of the
+documentation tree:
+
+* an implemented test whose header does not start with
+  ``@defgroup <package>-<test>`` and ``@ingroup <group>``, as the
+  generated stub does; a ``@page`` header, for instance, gives the
+  test a page that nothing links to;
+* a package description whose group no ``@defgroup`` defines, in a
+  ``.dox`` file or a ``package.xml``: the description joins its
+  group with ``@addtogroup``, which creates a new untitled group
+  when the group does not exist.
 
 Status
 ~~~~~~
