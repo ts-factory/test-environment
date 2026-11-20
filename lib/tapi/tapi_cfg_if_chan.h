@@ -29,7 +29,9 @@ typedef enum tapi_cfg_if_chan {
 } tapi_cfg_if_chan;
 
 /**
- * Get current number of network channels of a given type.
+ * Get current number of network channels of a given type. The channels
+ * are synchronized with the Test Agent first, so the number is the one
+ * the driver reports.
  *
  * @param ta          Test Agent name
  * @param if_name     Interface name
@@ -72,6 +74,20 @@ extern te_errno tapi_cfg_if_chan_cur_set(const char *ta,
                                          const char *if_name,
                                          tapi_cfg_if_chan chan_type,
                                          int num);
+
+/**
+ * Get the current number of Tx queues of an interface: the sum of its
+ * combined and Tx-only channels.
+ *
+ * @param[in]  ta       Test Agent name
+ * @param[in]  if_name  Interface name
+ * @param[out] num      Number of Tx queues
+ *
+ * @return Status code.
+ */
+extern te_errno tapi_cfg_if_chan_tx_queues_get(const char *ta,
+                                               const char *if_name,
+                                               unsigned int *num);
 
 #ifdef __cplusplus
 } /* extern "C" */

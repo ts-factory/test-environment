@@ -199,8 +199,21 @@ tapi_cfg_if_rss_hash_indir_commit(const char *ta,
                                   const char *if_name,
                                   unsigned int rss_context)
 {
-    return cfg_commit_fmt(
+    te_errno rc;
+
+    rc = cfg_commit_fmt(
                 "/agent:%s/interface:%s/rss:/context:%u/hash_indir:",
+                ta, if_name, rss_context);
+    if (rc != 0)
+        return rc;
+
+    /*
+     * Configurator does not read values back after a commit: get what
+     * the driver has applied, so that the getters do not return what
+     * was requested.
+     */
+    return cfg_synchronize_fmt(
+                true, "/agent:%s/interface:%s/rss:/context:%u/hash_indir:",
                 ta, if_name, rss_context);
 }
 
