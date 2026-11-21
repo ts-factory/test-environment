@@ -42,6 +42,88 @@
 #include "tapi_test.h"
 #include "tapi_tags.h"
 #include "tapi_sh_env.h"
+#include "tapi_rpc_misc.h"
+#include "conf_api.h"
+#include "tapi_cfg_dcbx.h"
+#include "tapi_cfg_ets.h"
+#include "tapi_cfg_pfc.h"
+
+/**
+ * Add TRC tags telling which DCB tests cannot run:
+ * - @c no_dcbx, @c no_ets, @c no_pfc: the IUT interface (node A of net1)
+ *   does not provide DCBX, ETS or PFC data (see tapi_cfg_dcbx_is_present()
+ *   and others);
+ * - @c no_dcb_tool: the dcb tool is not found on the IUT.
+ *
+ * The tests check the same conditions themselves and skip.
+ *
+ * @param iut_rpcs  RPC server on the IUT.
+ *
+ * @return Status code.
+ */
+static te_errno
+add_dcb_tags(rcf_rpc_server *iut_rpcs)
+{
+    static const struct {
+        const char *name;
+        const char *tag;
+        te_errno (*is_present)(const char *, const char *, bool *);
+    } features[] = {
+        { "DCBX", "no_dcbx", tapi_cfg_dcbx_is_present },
+        { "ETS", "no_ets", tapi_cfg_ets_is_present },
+        { "PFC", "no_pfc", tapi_cfg_pfc_is_present },
+    };
+    char *if_oid = NULL;
+    cfg_oid *oid = NULL;
+    unsigned int i;
+    bool present;
+    te_errno rc;
+
+    rc = cfg_get_instance_string_fmt(&if_oid, "/net:net1/node:A");
+    if (rc != 0)
+    {
+        ERROR("Failed to get the IUT interface: %r", rc);
+        return rc;
+    }
+
+    oid = cfg_convert_oid_str(if_oid);
+    if (oid == NULL || !oid->inst || oid->len != 3 ||
+        strcmp(cfg_oid_inst_subid(oid, 2), "interface") != 0)
+    {
+        ERROR("IUT node '%s' is not an agent interface", if_oid);
+        rc = TE_RC(TE_TAPI, TE_EINVAL);
+        goto out;
+    }
+
+    for (i = 0; i < TE_ARRAY_LEN(features); i++)
+    {
+        rc = features[i].is_present(CFG_OID_GET_INST_NAME(oid, 1),
+                                    CFG_OID_GET_INST_NAME(oid, 2),
+                                    &present);
+        if (rc != 0)
+            goto out;
+
+        if (!present)
+        {
+            RING("IUT interface '%s' does not provide %s", if_oid,
+                 features[i].name);
+            rc = tapi_tags_add_tag(features[i].tag, "");
+            if (rc != 0)
+                goto out;
+        }
+    }
+
+    if (rpc_te_file_check_executable(iut_rpcs, "dcb") != 0)
+    {
+        RING("dcb tool is not found on the IUT");
+        rc = tapi_tags_add_tag("no_dcb_tool", "");
+    }
+
+out:
+    cfg_free_oid(oid);
+    free(if_oid);
+    return rc;
+}
 
 int
 main(int argc, char **argv)
@@ -98,6 +180,9 @@ main(int argc, char **argv)
         WARN("Path to TRex exec is not specified in environment");
         CHECK_RC(tapi_tags_add_tag("no_trex", ""));
     }
+
+    TEST_STEP("Add TRC tags for DCB tests which cannot run");
+    CHECK_RC(add_dcb_tags(iut_rpcs));
 
     /* Print /local: subtree to see which TRC tags have been added */
     CHECK_RC(rc = cfg_tree_print(NULL, TE_LL_RING, "/local:%s", ""));

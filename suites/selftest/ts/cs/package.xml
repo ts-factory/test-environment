@@ -28,6 +28,13 @@
         </run>
 
         <run>
+            <script name="dcbx"/>
+            <arg name="env">
+                <value>{{{'pco_iut':IUT},if:'iut_if'}}</value>
+            </arg>
+        </run>
+
+        <run>
             <script name="loop" />
             <arg name="env">
                 <value>{{{'pco_iut':IUT}}}</value>
@@ -44,6 +51,13 @@
             <script name="dir" />
             <arg name="env">
                 <value>{{{'pco_iut':IUT}}}</value>
+            </arg>
+        </run>
+
+        <run>
+            <script name="ets"/>
+            <arg name="env">
+                <value>{{{'pco_iut':IUT},if:'iut_if'}}</value>
             </arg>
         </run>
 
@@ -71,6 +85,13 @@
             <script name="pci"/>
             <arg name="env">
                 <value>{{{'pco_iut':IUT}}}</value>
+            </arg>
+        </run>
+
+        <run>
+            <script name="pfc"/>
+            <arg name="env">
+                <value>{{{'pco_iut':IUT},if:'iut_if'}}</value>
             </arg>
         </run>
 
