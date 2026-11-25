@@ -24,12 +24,14 @@ endif
 headers += files(
     'rcf_ch_api.h',
     'rcf_pch.h',
+    'rcf_pch_conf_ext.h',
     'rcf_pch_ta_cfg.h',
     'rcf_pch_tree.h',
 )
 sources += files(
     'rcf_pch.c',
     'rcf_pch_conf.c',
+    'rcf_pch_conf_ext.c',
     'rcf_pch_file.c',
     'rcf_pch_plugin.c',
     'rcf_pch_rpc.c',

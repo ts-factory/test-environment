@@ -1,0 +1,460 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Interpretica, Unipessoal Lda. All rights reserved.
+#
+# Test Environment Builder
+#
+# Fetch external git repositories declared with TE_EXT_REPO in
+# builder configuration file.
+#
+# Each repository is cloned into ${TE_BUILD}/ext-repos/<name> and
+# the requested reference (tag, commit hash or branch) is checked
+# out with a detached HEAD.
+#
+# A build does not move to a newer commit on its own. The script
+# records the commit a reference resolved to in a lock file next to
+# the builder configuration file, and each later build checks out
+# the recorded commit, wherever the reference points upstream by
+# then. The lock file belongs to the test suite; commit it, and a
+# machine that has not built this suite before, a clean CI worker
+# included, builds the same sources.
+#
+# Moving to a newer commit is an explicit action: run dispatcher.sh
+# with --update-external, which gets here as the --update option.
+# The script then re-resolves the references, rewrites the lock file
+# and reports what moved. A changed URL or reference in the
+# configuration re-resolves that repository too, since that is a
+# request for a different commit.
+#
+# The checkout directory survives rebuilds, so the script compares
+# the declared URL with the origin of the existing clone. If the
+# repository has moved, the script points origin at the new URL,
+# with a warning, rather than fetch from the old one. It fetches the
+# refs of the new origin only when it has to resolve a reference
+# against them; a recorded commit that is in the clone builds
+# without a fetch.
+#
+# The script keeps local modifications in the checkout directory.
+# While the requested commit is already checked out it builds them,
+# so that you can debug an external library in place; moving to
+# another commit over them is an error.
+#
+# Usage: te_fetch_ext_repos [--update] <processed builder conf> <lock>
+
+set -e
+
+# Set by the --update option: re-resolve the references instead of
+# building the recorded commits.
+update=
+
+# Names of the repositories the lock file knows about, including
+# the ones no platform of this run uses: another builder
+# configuration may need them, so their records stay.
+lock_names=
+
+# The recorded declaration of a repository is held in
+# LOCKED_<name>_{URL,REF,COMMIT}, set with printf -v and read back
+# with indirect expansion. An associative array would say it better,
+# but it needs bash 4 and the Builder scripts run under bash 3 too.
+
+#######################################
+# Die with a message.
+# Arguments:
+#   Arguments to the message.
+# Outputs:
+#   Writes the message to stderr.
+# Returns:
+#   This function never returns.
+#######################################
+function error() {
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+#######################################
+# Report a condition that does not stop the build.
+# Arguments:
+#   Arguments to the message.
+# Outputs:
+#   Writes the message to stderr.
+#######################################
+function warn() {
+    echo "WARNING: $*" >&2
+}
+
+#######################################
+# Read the lock file into the records of the declarations.
+#
+# A lock file that does not exist yet is not an error: the first
+# build of a suite records the commits it resolves.
+# Globals:
+#   lock_names
+#   LOCKED_<name>_URL
+#   LOCKED_<name>_REF
+#   LOCKED_<name>_COMMIT
+# Arguments:
+#   Lock file, a path.
+# Returns:
+#   0, or does not return if a record is malformed.
+#######################################
+function read_lock() {
+    local file="$1"
+    local name url ref commit
+
+    [[ -r "${file}" ]] || return 0
+
+    while read -r name url ref commit ; do
+        case "${name}" in
+            ''|'#'*) continue ;;
+            *[!A-Za-z0-9_]*)
+                error "${file}: bad repository name '${name}'" ;;
+        esac
+        [[ -n "${commit}" ]] \
+            || error "${file}: incomplete record for '${name}'"
+        printf -v "LOCKED_${name}_URL" '%s' "${url}"
+        printf -v "LOCKED_${name}_REF" '%s' "${ref}"
+        printf -v "LOCKED_${name}_COMMIT" '%s' "${commit}"
+        lock_names="${lock_names} ${name}"
+    done <"${file}"
+}
+
+#######################################
+# Rewrite the lock file if the records have changed.
+#
+# The file lives in the test suite checkout, which a CI worker may
+# have read-only, so write there only when the records differ: a
+# rebuild that changes nothing must not fail on it.
+# Globals:
+#   lock_names
+#   LOCKED_<name>_URL
+#   LOCKED_<name>_REF
+#   LOCKED_<name>_COMMIT
+# Arguments:
+#   Lock file, a path.
+# Outputs:
+#   Reports an updated file on stdout.
+#######################################
+function write_lock() {
+    local file="$1"
+    local tmp="${file}.new"
+    local name
+    local content
+    local url_var
+    local ref_var
+    local commit_var
+
+    content="$(
+        echo "# External repositories pinned by the Test Environment Builder."
+        echo "# Commit this file: it makes the build reproducible."
+        echo "# Run dispatcher.sh --update-external to move the records on."
+        for name in ${lock_names} ; do
+            url_var="LOCKED_${name}_URL"
+            ref_var="LOCKED_${name}_REF"
+            commit_var="LOCKED_${name}_COMMIT"
+            echo "${name} ${!url_var} ${!ref_var} ${!commit_var}"
+        done | sort -u
+    )"
+
+    if [[ -r "${file}" && "$(cat "${file}")" == "${content}" ]] ; then
+        return 0
+    fi
+
+    echo "${content}" >"${tmp}" || error "Failed to write ${tmp}"
+    mv "${tmp}" "${file}" || error "Failed to update ${file}"
+    echo "External repos: ${file} updated"
+}
+
+#######################################
+# Die with the diagnostics of a failed network operation.
+#
+# The first build on a machine is where this goes wrong, and git's
+# own diagnostics do not say whose credentials it wanted. The Builder
+# has none of its own: it runs git in the environment of the build
+# and inherits its credentials.
+# Arguments:
+#   Repository name.
+#   Operation that failed, a verb phrase.
+#   Repository URL.
+# Outputs:
+#   Writes the diagnostics to stderr.
+# Returns:
+#   This function never returns.
+#######################################
+function network_error() {
+    local name="$1"; shift
+    local action="$1"; shift
+    local url="$1"; shift
+
+    error "External repo ${name}: failed to ${action} ${url}." \
+          "The Builder uses the git credentials of the environment it" \
+          "runs in, so check the SSH agent, the keys or the credential" \
+          "helper available to this build. To take the repository from" \
+          "a mirror, add a 'url.<mirror>.insteadOf' rewrite to the git" \
+          "configuration; a changed declared URL asks for a different" \
+          "commit."
+}
+
+#######################################
+# Resolve a reference to a commit.
+#
+# Prefers the remote branch tip over a stale local one.
+# Arguments:
+#   Repository directory, a path.
+#   Reference to resolve: a branch, a tag or a commit hash.
+# Outputs:
+#   Writes the commit hash to stdout.
+# Returns:
+#   0 if the reference resolves, non-zero otherwise.
+#######################################
+function resolve_ref() {
+    local dir="$1"; shift
+    local ref="$1"; shift
+
+    git -C "${dir}" rev-parse --quiet --verify "origin/${ref}^{commit}" \
+        || git -C "${dir}" rev-parse --quiet --verify "${ref}^{commit}"
+}
+
+#######################################
+# Check whether a commit is present in a repository.
+# Arguments:
+#   Repository directory, a path.
+#   Commit hash.
+# Returns:
+#   0 if the repository has the commit, non-zero otherwise.
+#######################################
+function has_commit() {
+    git -C "$1" cat-file -e "$2^{commit}" 2>/dev/null
+}
+
+#######################################
+# Check whether a working tree has been checked out at all.
+#
+# A clone made with --no-checkout has an empty index and an empty
+# working tree, the same as after a deletion of every file, and
+# needs a checkout even if HEAD points to the requested commit.
+# Arguments:
+#   Repository directory, a path.
+# Returns:
+#   0 if the working tree holds files, non-zero otherwise.
+#######################################
+function repo_is_checked_out() {
+    local dir="$1"; shift
+
+    [[ -n "$(git -C "${dir}" ls-files | head -n 1)" ]]
+}
+
+#######################################
+# Check whether a working tree carries changes a checkout destroys.
+#
+# Tracked modifications and untracked files both count: to somebody
+# who edited the sources in place they are the same work. Ignored
+# files are build leftovers and do not count.
+# Arguments:
+#   Repository directory, a path.
+# Returns:
+#   0 if the working tree has local modifications, non-zero
+#   otherwise.
+#######################################
+function repo_is_dirty() {
+    local dir="$1"; shift
+
+    repo_is_checked_out "${dir}" || return 1
+
+    [[ -n "$(git -C "${dir}" status --porcelain | head -n 1)" ]]
+}
+
+#######################################
+# Check out one declared repository and record what was checked out.
+# Globals:
+#   TE_BUILD
+#   lock_names
+#   LOCKED_<name>_URL
+#   LOCKED_<name>_REF
+#   LOCKED_<name>_COMMIT
+#   update
+# Arguments:
+#   Repository name, as declared with TE_EXT_REPO.
+# Outputs:
+#   Reports what the repository is built from on stdout.
+# Returns:
+#   0, or does not return if the repository cannot be obtained.
+#######################################
+function fetch_repo() {
+    local name="$1"; shift
+    local url_var="TE_BS_EXT_REPO_${name}_URL"
+    local ref_var="TE_BS_EXT_REPO_${name}_REF"
+    local url="${!url_var}"
+    local ref="${!ref_var}"
+    local dir="${TE_BUILD}/ext-repos/${name}"
+    local commit=
+    local origin=
+    local origin_changed=
+    local head=
+    local locked_url_var="LOCKED_${name}_URL"
+    local locked_ref_var="LOCKED_${name}_REF"
+    local locked_commit_var="LOCKED_${name}_COMMIT"
+    local locked="${!locked_commit_var:-}"
+
+    [[ -n "${url}" ]] || error "External repo ${name}: URL is empty"
+    [[ -n "${ref}" ]] || error "External repo ${name}: ref is empty"
+
+    # A record belongs to the declaration it was made for: changing
+    # the URL or the ref is an explicit request for another commit
+    if [[ -n "${locked}"
+          && ( "${!locked_url_var:-}" != "${url}"
+               || "${!locked_ref_var:-}" != "${ref}" ) ]] ; then
+        echo "External repo ${name}: declaration changed" \
+             "('${!locked_ref_var:-}' -> '${ref}'), re-resolving"
+        locked=
+    fi
+
+    if [[ ! -d "${dir}/.git" ]] ; then
+        echo "External repo ${name}: cloning ${url}"
+        git clone --no-checkout "${url}" "${dir}" \
+            || network_error "${name}" clone "${url}"
+    else
+        # The clone is reused across builds, so its origin may be a
+        # URL that is no longer the declared one. A fetch would then
+        # go to the old origin and the build would use the code of
+        # a different repository.
+        origin="$(git -C "${dir}" config --get remote.origin.url)" || origin=
+        if [[ "${origin}" != "${url}" ]] ; then
+            warn "External repo ${name}: origin changed" \
+                 "'${origin}' -> '${url}'"
+            git -C "${dir}" remote set-url origin "${url}" \
+                || error "External repo ${name}: failed to set origin to ${url}"
+            # The remote-tracking refs still describe the previous
+            # origin, so a reference may not resolve against them
+            # any more. The code below decides whether that costs a
+            # fetch: a commit that is recorded and present needs no
+            # reference resolution.
+            origin_changed=yes
+        fi
+    fi
+
+    if [[ -n "${locked}" && -z "${update}" ]] ; then
+        # The record makes the build reproducible: wherever the ref
+        # points upstream now, the build uses the commit the ref
+        # resolved to when the script made the record
+        if ! has_commit "${dir}" "${locked}" ; then
+            echo "External repo ${name}: fetching recorded ${locked}"
+            git -C "${dir}" fetch --tags ${origin_changed:+--prune --force} \
+                origin \
+                || network_error "${name}" "fetch from" "${url}"
+            has_commit "${dir}" "${locked}" \
+                || error "External repo ${name}: recorded commit ${locked} is" \
+                      "not in ${url} any more; re-run with --update-external" \
+                      "to move to '${ref}'"
+        fi
+        commit="${locked}"
+    else
+        # Do not let the refs of the previous origin decide: a stale
+        # origin/<ref> would resolve to a commit of the old
+        # repository
+        if [[ -n "${origin_changed}" ]] ; then
+            echo "External repo ${name}: re-fetching ${url}"
+            git -C "${dir}" fetch --tags --prune --force origin \
+                || network_error "${name}" "fetch from" "${url}"
+        fi
+
+        commit="$(resolve_ref "${dir}" "${ref}")" || commit=
+
+        # Only an explicit update looks upstream for a newer commit
+        [[ -z "${update}" ]] || commit=
+
+        if [[ -z "${commit}" ]] ; then
+            echo "External repo ${name}: fetching ${url}"
+            git -C "${dir}" fetch --tags origin \
+                || network_error "${name}" "fetch from" "${url}"
+            commit="$(resolve_ref "${dir}" "${ref}")" \
+                || error "External repo ${name}: cannot resolve ref '${ref}'"
+        fi
+
+        if [[ -z "${locked}" ]] ; then
+            echo "External repo ${name}: recording ${ref} as ${commit}"
+        elif [[ "${locked}" == "${commit}" ]] ; then
+            echo "External repo ${name}: ${ref} is already up to date" \
+                 "(${commit})"
+        else
+            echo "External repo ${name}: updating ${ref}" \
+                 "from ${locked} to ${commit}"
+        fi
+    fi
+
+    printf -v "LOCKED_${name}_URL" '%s' "${url}"
+    printf -v "LOCKED_${name}_REF" '%s' "${ref}"
+    printf -v "LOCKED_${name}_COMMIT" '%s' "${commit}"
+    case " ${lock_names} " in
+        *" ${name} "*) ;;
+        *) lock_names="${lock_names} ${name}" ;;
+    esac
+
+    head="$(git -C "${dir}" rev-parse HEAD 2>/dev/null)" || head=
+
+    if [[ "${head}" == "${commit}" ]] && repo_is_checked_out "${dir}" ; then
+        # Already at the requested commit. Keep sources edited in
+        # place: you edit an external library in the checkout
+        # directory in order to rebuild it.
+        if repo_is_dirty "${dir}" ; then
+            warn "External repo ${name}: ${dir} has local modifications," \
+                 "building them as is"
+        fi
+    else
+        if repo_is_dirty "${dir}" ; then
+            error "External repo ${name}: ${dir} has local modifications" \
+                  "and must move to '${ref}'; commit or stash them, or" \
+                  "discard them with 'git -C ${dir} reset --hard'"
+        fi
+        git -C "${dir}" checkout --force --detach "${commit}" \
+            || error "External repo ${name}: failed to check out '${ref}'"
+    fi
+
+    echo "External repo ${name}: using ${ref} (${commit})"
+}
+
+#######################################
+# Obtain every repository the builder configuration declares.
+# Globals:
+#   TE_BUILD
+#   TE_BS_CONF_ERR
+#   TE_BS_EXT_REPOS
+#   update
+# Arguments:
+#   Command line of the script, see the usage above.
+# Outputs:
+#   Reports what each repository is built from on stdout.
+#######################################
+function main() {
+    local conf_file
+    local lock_file
+    local ext_repo
+
+    if [[ "$1" == "--update" ]] ; then
+        update=yes
+        shift
+    fi
+    conf_file="$1"
+    lock_file="$2"
+    [[ -n "${conf_file}" && -r "${conf_file}" && -n "${lock_file}" ]] \
+        || error "Usage: $(basename "$0") [--update]" \
+              "<processed builder conf> <lock>"
+
+    [[ -n "${TE_BUILD}" ]] || error "TE_BUILD is not set"
+
+    # Dummy loop: TE_BS_* macros use 'break' to report configuration errors
+    while true ; do
+        . "${conf_file}"
+        break
+    done
+    [[ -z "${TE_BS_CONF_ERR}" ]] || error "${TE_BS_CONF_ERR}"
+
+    read_lock "${lock_file}"
+
+    for ext_repo in ${TE_BS_EXT_REPOS} ; do
+        fetch_repo "${ext_repo}"
+    done
+
+    write_lock "${lock_file}"
+}
+
+main "$@"
