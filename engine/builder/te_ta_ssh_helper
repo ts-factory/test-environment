@@ -84,11 +84,7 @@ te_ta_ssh_args() {
     local ssh_proxy_var="${pfx}_SSH_PROXY"
     local ssh_proxy="${!ssh_proxy_var:-${TE_SSH_PROXY}}"
 
-    if test -n "${ssh_proxy}" ; then
-        local proxy_cmd=(ssh "${TE_SSH_ARGS_DEF[@]}" -W %h:%p "${ssh_proxy}")
-        ssh_args+=(-o ProxyCommand=\"${proxy_cmd[*]}\")
-    fi
-
+    test -z "${ssh_proxy}" || ssh_args+=(-J "${ssh_proxy}")
     test -z "${ssh_key}" || ssh_args+=(-i "${ssh_key}")
     test -z "${ssh_port}" || ssh_args+=(-p "${ssh_port}")
     test -z "${ssh_user}" || ssh_args+=(-l "${ssh_user}")
